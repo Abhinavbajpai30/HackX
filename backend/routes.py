@@ -1,9 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from db import get_async_session
-from models import InvoiceDB, PurchaseOrderDB, CompareResponseDB
-from auth import fastapi_users, UserRead
+from models import InvoiceDB, PurchaseOrderDB, CompareResponseDB, GmailUser
 from typing import List, Optional, Dict, Any
 from gemini_utils import (
     call_gemini_api,
@@ -17,10 +17,59 @@ import json
 router = APIRouter()
 
 
+# --- Helper function for optional authentication ---
+async def get_optional_user(
+    authorization: Optional[str] = Header(None),
+    session: AsyncSession = Depends(get_async_session)
+) -> Optional[dict]:
+    """
+    Optional authentication dependency.
+    Returns user info if valid token is provided, None otherwise.
+    Does not raise exceptions - allows unauthenticated access.
+    """
+    if not authorization:
+        return None
+    
+    try:
+        # Import here to avoid circular dependency
+        from mail import verify_token
+        
+        scheme, token = authorization.split()
+        if scheme.lower() != "bearer":
+            return None
+        
+        payload = verify_token(token)
+        user_email = payload.get("email")
+        
+        if not user_email:
+            return None
+        
+        # Verify user exists in database
+        res_user = await session.execute(select(GmailUser).where(GmailUser.email == user_email))
+        user = res_user.scalar_one_or_none()
+        
+        if not user:
+            return None
+        
+        # Check if token was invalidated by logout
+        if user.logged_out_at and user.logged_out_at > payload.get("iat", 0):
+            return None
+        
+        return {
+            "id": user.id,
+            "email": user.email,
+            "user_info": user.user_info,
+        }
+    except Exception as e:
+        # Log error but don't raise - allow unauthenticated access
+        print(f"Optional auth failed: {e}")
+        return None
+
+
 # --- Pydantic Schemas ---
 class DocumentData(BaseModel):
     """Schema for the extracted data from a document."""
-
+    id: Optional[int] = None
     # Core identifiers
     vendor_name: Optional[str] = None
     vendor_id: Optional[str] = None
@@ -107,10 +156,14 @@ class CompareResponse(BaseModel):
 async def extract_data(
     request: ExtractRequest,
     session: AsyncSession = Depends(get_async_session),
+    current_user: Optional[dict] = Depends(get_optional_user),
 ):
     """
     Receives a base64-encoded image and uses Gemini Vision to extract
     structured data according to EXTRACTION_SCHEMA.
+    
+    If user is authenticated, the document will be linked to their account.
+    If not authenticated, the document is created without a user link.
     """
     print(f"Received extraction request for: {request.image_mime_type}")
 
@@ -119,6 +172,7 @@ async def extract_data(
         "Analyze the provided document image (invoice or PO) and extract key information "
         "according to the provided JSON schema. "
         "If a field is not present, omit it from the JSON."
+        "Provide is_invoice as true for invoices, false for purchase orders."
     )
 
     payload = {
@@ -144,6 +198,13 @@ async def extract_data(
     try:
         extracted_json = await call_gemini_api(EXTRACTION_MODEL, payload)
         validated_data = DocumentData(**extracted_json)
+        
+        # Get user ID if authenticated, None otherwise
+        user_id = current_user["id"] if current_user else None
+        if current_user:
+            print(f"Document created by authenticated user: {current_user['email']} (ID: {user_id})")
+        else:
+            print("Document created without authentication")
 
         ModelClass = InvoiceDB if validated_data.is_invoice else PurchaseOrderDB
 
@@ -197,12 +258,12 @@ async def extract_data(
             line_items=validated_data.line_items,
 
             # Relationships
-            created_by=getattr(validated_data, "created_by", None),
+            created_by=user_id,  # Set to user's ID if authenticated, None otherwise
         )
 
         session.add(db_doc)
         await session.commit()
-        return validated_data
+        return {**validated_data.model_dump(), "id": db_doc.id}
 
     except Exception as e:
         print(f"Extraction failed: {str(e)}")
