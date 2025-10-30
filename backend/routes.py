@@ -3,10 +3,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from db import get_async_session
-from datetime import datetime
-from vps_utils import compute_vps_from_compare_data
 from models import InvoiceDB, PurchaseOrderDB, CompareResponseDB, GmailUser
 from typing import List, Optional, Dict, Any
+import datetime
 from gemini_utils import (
     call_gemini_api,
     EXTRACTION_SCHEMA,
@@ -15,6 +14,10 @@ from gemini_utils import (
     COMPARISON_SCHEMA,
 )
 import json
+import base64
+import httpx
+
+router = APIRouter()
 
 router = APIRouter()
 
@@ -125,9 +128,15 @@ class DocumentData(BaseModel):
     created_by: Optional[int] = None
 
 class ExtractRequest(BaseModel):
-    """Request model for the /extract-data endpoint."""
-    image_data: str = Field(..., description="Base64-encoded image string.")
-    image_mime_type: str = Field(..., description="MIME type of the image (e.g., 'image/png').")
+    """Request model for the /extract-data endpoint.
+    Provide either a base64 image OR an attachment_url returned by the Gmail integration.
+    """
+    image_data: Optional[str] = Field(None, description="Base64-encoded image string.")
+    image_mime_type: Optional[str] = Field(None, description="MIME type of the image (e.g., 'image/png').")
+    attachment_url: Optional[str] = Field(
+        None,
+        description="Direct download URL of the attachment (e.g., /user/emails/{message_id}/attachments/{filename})."
+    )
 
 
 class ExtractResponse(DocumentData):
@@ -167,7 +176,25 @@ async def extract_data(
     If user is authenticated, the document will be linked to their account.
     If not authenticated, the document is created without a user link.
     """
-    print(f"Received extraction request for: {request.image_mime_type}")
+    # Resolve image bytes: support either base64 input or attachment URL
+    resolved_image_b64: Optional[str] = None
+    resolved_mime: Optional[str] = None
+
+    if request.attachment_url:
+        # Fetch the attachment from our own download endpoint or any accessible URL
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.get(request.attachment_url)
+            if resp.status_code != 200:
+                raise HTTPException(status_code=400, detail=f"Failed to fetch attachment: {resp.status_code}")
+            content_type = resp.headers.get("content-type", "application/octet-stream")
+            # Strip charset if present
+            resolved_mime = content_type.split(";")[0].strip() if content_type else "application/octet-stream"
+            resolved_image_b64 = base64.b64encode(resp.content).decode("utf-8")
+    else:
+        if not request.image_data:
+            raise HTTPException(status_code=422, detail="Provide either image_data or attachment_url")
+        resolved_image_b64 = request.image_data
+        resolved_mime = request.image_mime_type or "image/png"
 
     extraction_prompt = (
         "You are an expert OCR and data extraction service. "
@@ -184,8 +211,8 @@ async def extract_data(
                     {"text": extraction_prompt},
                     {
                         "inlineData": {
-                            "mimeType": request.image_mime_type,
-                            "data": request.image_data,
+                        "mimeType": resolved_mime,
+                            "data": resolved_image_b64,
                         }
                     },
                 ]
@@ -420,7 +447,7 @@ class VPSResponse(BaseModel):
     persona: str
     vps_score: float
     aggregated_risk: float
-    last_updated: datetime
+    last_updated: datetime.datetime
 
 DEFAULT_PERSONA = "margin"
 

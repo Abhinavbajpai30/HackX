@@ -24,6 +24,7 @@ from dotenv import load_dotenv, find_dotenv
 from contextlib import asynccontextmanager
 import jwt
 import secrets
+import httpx
 
 load_dotenv(find_dotenv())
 
@@ -904,25 +905,51 @@ async def handle_new_email(user_email: str, email_info: dict, full_message: dict
             stat.last_email_date = datetime.utcnow()
         await session.commit()
     
-    # Example 3: Extract and store attachments info
-    if 'parts' in full_message['payload']:
-        attachments = []
-        for part in full_message['payload']['parts']:
-            if part.get('filename'):
-                attachments.append({
-                    "filename": part['filename'],
-                    "mime_type": part['mimeType'],
-                    "size": part['body'].get('size', 0)
-                })
-        
-        if attachments:
-            res_email = await session.execute(select(GmailEmail).where(GmailEmail.message_id == email_info['message_id']))
-            row = res_email.scalar_one_or_none()
-            if row:
-                row.attachments = attachments
-                row.has_attachments = True
-                await session.commit()
-            print(f"📎 Email has {len(attachments)} attachment(s)")
+# Example 3: Extract and store attachments info
+    # Reuse the recursive extractor to find all attachments and then filter images
+    image_attachments = []
+    attachments = extract_attachments_info(full_message)
+    if attachments:
+        res_email = await session.execute(select(GmailEmail).where(GmailEmail.message_id == email_info['message_id']))
+        row = res_email.scalar_one_or_none()
+        if row:
+            row.attachments = attachments
+            row.has_attachments = True
+            await session.commit()
+        print(f"📎 Email has {len(attachments)} attachment(s)")
+        image_attachments = [a for a in attachments if str(a.get('mime_type','')).startswith('image/')]
+    
+    # Auto-trigger extraction: subject contains 'invoice' and has image attachment(s)
+    try:
+        if 'invoice' in subject and image_attachments:
+            from urllib.parse import quote
+            message_id = email_info.get('message_id')
+            print(f"🧾 Invoice email detected with {len(image_attachments)} image attachment(s). Triggering extraction...")
+            # Generate a short-lived JWT so /extract-data can attribute created_by
+            # Note: Using same user_info stored on GmailUser
+            res_user = await session.execute(select(GmailUser).where(GmailUser.email == user_email))
+            user_row = res_user.scalar_one_or_none()
+            user_info = user_row.user_info if user_row else {"email": user_email}
+            access_token = create_access_token(user_email, user_info)
+
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                for att in image_attachments:
+                    encoded_filename = quote(att['filename'])
+                    attachment_url = f"{BASE_URL}/user/emails/{message_id}/attachments/{encoded_filename}"
+                    payload = {
+                        "attachment_url": attachment_url
+                    }
+                    headers = {"Authorization": f"Bearer {access_token}"}
+                    try:
+                        resp = await client.post(f"{BASE_URL}/extract-data", json=payload, headers=headers)
+                        if resp.status_code == 200:
+                            print(f"✅ Extracted document from attachment '{att['filename']}'")
+                        else:
+                            print(f"❌ Extraction failed for '{att['filename']}': {resp.status_code} {resp.text}")
+                    except Exception as e:
+                        print(f"❌ HTTP error calling /extract-data for '{att['filename']}': {e}")
+    except Exception as e:
+        print(f"❌ Auto-extract pipeline error: {e}")
     
     # Example 4: Auto-tag promotional emails
     if any(keyword in subject for keyword in ['sale', 'discount', 'offer', 'deal']):
