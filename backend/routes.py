@@ -19,7 +19,7 @@ router = APIRouter()
 # --- Pydantic Schemas ---
 class DocumentData(BaseModel):
     """Schema for the extracted data from a document."""
-
+    id: Optional[int] = None
     # Core identifiers
     vendor_name: Optional[str] = None
     vendor_id: Optional[str] = None
@@ -201,7 +201,7 @@ async def extract_data(
 
         session.add(db_doc)
         await session.commit()
-        return validated_data
+        return {**validated_data.model_dump(), "id": db_doc.id}
 
     except Exception as e:
         print(f"Extraction failed: {str(e)}")

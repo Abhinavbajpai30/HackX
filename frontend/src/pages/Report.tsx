@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { Particles } from "@/components/ui/particles";
 import { AIInputWithFile } from "@/components/ui/ai-input-with-file";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -7,66 +7,29 @@ import { ArrowLeft, Info } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ChatMessage } from "@/components/chat/ChatMessage";
 
-type Difference = {
-  id: string;
-  field: string;
-  invoice: string | number | null;
-  po: string | number | null;
-  severity: "low" | "medium" | "high";
-  note: string;
-  recommendation?: string;
+type Discrepancy = {
+  name: string;
+  details: string;
+};
+
+type CompareReport = {
+  summary: string;
+  discrepancy: Discrepancy[];
 };
 
 export default function Report() {
-  // Dummy, replace with backend payload later
-  const summary = useMemo(
-    () => ({
-      vendor: "Acme Supplies Pvt Ltd",
-      invoiceNumber: "INV-2025-0142",
-      poNumber: "PO-22915",
-      invoiceDate: "2025-10-02",
-      dueDate: "2025-11-01",
-      currency: "INR",
-      total: 128450.0,
-      items: 7,
-      taxes: "GST 18%",
-      status: "Pending Review",
-    }),
-    [],
-  );
+  const location = useLocation();
+  const navigate = useNavigate();
+  const report = (location.state as { report?: CompareReport } | null)?.report;
 
-  const differences: Difference[] = useMemo(
-    () => [
-      {
-        id: "qty-line-3",
-        field: "Quantity (Line 3)",
-        invoice: 120,
-        po: 100,
-        severity: "high",
-        note: "Invoice shows 20 more units than PO.",
-        recommendation: "Verify delivery challan and adjust bill or raise a debit note.",
-      },
-      {
-        id: "rate-item-5",
-        field: "Rate (Item 5)",
-        invoice: "₹1,250.00",
-        po: "₹1,200.00",
-        severity: "medium",
-        note: "Rate increased by 4.2% vs. PO.",
-        recommendation: "Confirm revised quote or apply PO rate.",
-      },
-      {
-        id: "gst-mismatch",
-        field: "GST Split",
-        invoice: "18% IGST",
-        po: "9% CGST + 9% SGST",
-        severity: "low",
-        note: "Tax structure differs; total tax equal.",
-        recommendation: "Confirm place-of-supply and company GST registrations.",
-      },
-    ],
-    [],
-  );
+  // Fallback if navigated directly without state
+  useEffect(() => {
+    if (!report) {
+      navigate("/", { replace: true });
+    }
+  }, [report, navigate]);
+
+  const differences = useMemo(() => report?.discrepancy ?? [], [report]);
 
   // Chat state
   const [messages, setMessages] = useState<{ role: "assistant" | "user"; content: string }[]>([
@@ -92,12 +55,16 @@ export default function Report() {
     // Simple mock assistant reply
     const reply =
       text.toLowerCase().includes("summary")
-        ? `Summary: Vendor ${summary.vendor}, Invoice ${summary.invoiceNumber} vs PO ${summary.poNumber}. Total ₹${summary.total.toLocaleString()} ${summary.currency}. ${differences.length} potential issues.`
-        : `Top flagged item: ${differences[0].field} — ${differences[0].note}`;
+        ? `Summary: ${report?.summary ?? "No summary"}`
+        : differences.length
+        ? `Top flagged item: ${differences[0].name} — ${differences[0].details}`
+        : "No discrepancies found.";
     setTimeout(() => setMessages((m) => [...m, { role: "assistant", content: reply }]), 400);
   };
 
-  const dot = (s: Difference["severity"]) => (s === "high" ? "bg-red-500" : "bg-amber-400");
+  const dot = (idx: number) => (idx === 0 ? "bg-red-500" : "bg-amber-400");
+
+  if (!report) return null;
 
   return (
     <div className="relative min-h-screen bg-background overflow-hidden">
@@ -117,14 +84,14 @@ export default function Report() {
             Verification Report
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Invoice {summary.invoiceNumber} vs PO {summary.poNumber}
+            AI-powered comparison result
           </p>
         </header>
 
         {/* Summary - plain text */}
         <section className="rounded-xl border bg-card p-5 md:p-6 mb-6">
           <p className="text-sm text-foreground leading-relaxed">
-            Vendor <span className="font-medium">{summary.vendor}</span> — Invoice <span className="font-medium">{summary.invoiceNumber}</span> vs PO <span className="font-medium">{summary.poNumber}</span>. Issued on <span className="font-medium">{summary.invoiceDate}</span>, due by <span className="font-medium">{summary.dueDate}</span>. Total <span className="font-medium">₹{summary.total.toLocaleString()} {summary.currency}</span> for <span className="font-medium">{summary.items}</span> items, taxes: <span className="font-medium">{summary.taxes}</span>. Status: <span className="font-medium">{summary.status}</span>.
+            {report.summary}
           </p>
         </section>
 
@@ -135,34 +102,27 @@ export default function Report() {
             <span className="text-xs text-muted-foreground">{differences.length} findings</span>
           </div>
           <div className="grid md:grid-cols-2 gap-4">
-            {differences.map((d) => (
-              <article key={d.id} className="rounded-xl border bg-card p-4">
+            {differences.map((d, i) => (
+              <article key={`${d.name}-${i}`} className="rounded-xl border bg-card p-4">
                 <div className="flex items-center gap-2 mb-2">
-                  <span className={cn("inline-block h-2.5 w-2.5 rounded-full shrink-0", dot(d.severity))} />
-                  <div className="font-medium text-foreground">{d.field.replace(/\s*\(.*\)/, "")}</div>
-                  {d.recommendation && (
+                  <span className={cn("inline-block h-2.5 w-2.5 rounded-full shrink-0", dot(i))} />
+                  <div className="font-medium text-foreground">{d.name}</div>
+                  {d.details && (
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger className="ml-auto inline-flex items-center text-muted-foreground hover:text-foreground">
                           <Info className="h-4 w-4" />
                         </TooltipTrigger>
                         <TooltipContent sideOffset={6} className="max-w-xs text-xs leading-relaxed">
-                          {d.recommendation}
+                          {d.details}
                         </TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
                   )}
                 </div>
-                <dl className="grid grid-cols-2 gap-3 text-sm">
-                  <div>
-                    <dt className="text-muted-foreground">Invoice</dt>
-                    <dd className="font-medium break-words">{String(d.invoice)}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-muted-foreground">PO</dt>
-                    <dd className="font-medium break-words">{String(d.po)}</dd>
-                  </div>
-                </dl>
+                <div className="text-sm text-foreground">
+                  {d.details}
+                </div>
               </article>
             ))}
           </div>
