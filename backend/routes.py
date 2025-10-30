@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select,text
 from db import get_async_session
 from datetime import datetime
 from vps_utils import compute_vps_from_compare_data
-from models import InvoiceDB, PurchaseOrderDB, CompareResponseDB, GmailUser
+from models import InvoiceDB, PurchaseOrderDB, CompareResponseDB, GmailUser, ReportDB
 from typing import List, Optional, Dict, Any
 from gemini_utils import (
     call_gemini_api,
@@ -149,6 +149,7 @@ class Discrepancy(BaseModel):
 
 class CompareResponse(BaseModel):
     """Schema for the final comparison report."""
+    vendor_id: Optional[str] = Field(None, description="Vendor identifier associated with the documents.")
     discrepancy: List[Discrepancy] = Field(default_factory=list)
     summary: str = Field(..., description="A human-readable summary of the findings.")
 
@@ -275,15 +276,16 @@ async def extract_data(
 @router.post("/compare-data", response_model=CompareResponse)
 async def compare_data(request: CompareRequest, session: AsyncSession = Depends(get_async_session)):
     """
-    Compare a Purchase Order and Invoice by fetching from DB using IDs.
-    Runs rule-based discrepancy detection and Gemini reasoning to produce a structured report.
+    Compare a Purchase Order and Invoice by fetching them from DB using their IDs.
+    Performs rule-based discrepancy detection and Gemini reasoning to produce a structured report.
+    Also creates a corresponding report record (chat-style) with full context.
     """
     print(f"Received comparison request: PO_ID={request.po_id}, INVOICE_ID={request.invoice_id}")
 
-    from models import PurchaseOrderDB, InvoiceDB, CompareResponseDB
     from discrepancy_utils import calculate_discrepancy
+    from models import PurchaseOrderDB, InvoiceDB, CompareResponseDB, ReportDB
 
-    # Step 1: Fetch PO and Invoice
+    # ---------------------- Step 1: Fetch PO & Invoice ----------------------
     po_record = await session.get(PurchaseOrderDB, request.po_id)
     invoice_record = await session.get(InvoiceDB, request.invoice_id)
 
@@ -292,7 +294,7 @@ async def compare_data(request: CompareRequest, session: AsyncSession = Depends(
     if not invoice_record:
         raise HTTPException(status_code=404, detail=f"Invoice with ID {request.invoice_id} not found.")
 
-    # Step 2: Convert SQLAlchemy objects to full dicts (all fields)
+    # ---------------------- Step 2: Convert models to dict ----------------------
     def model_to_dict(obj):
         return {
             "id": obj.id,
@@ -337,10 +339,12 @@ async def compare_data(request: CompareRequest, session: AsyncSession = Depends(
     po_data = model_to_dict(po_record)
     invoice_data = model_to_dict(invoice_record)
 
-    # Step 3: Rule-based discrepancy detection
+    # ---------------------- Step 3: Discrepancy detection ----------------------
     discrepancy_result = calculate_discrepancy(po_data, invoice_data)
+    discrepancy_vector = list(discrepancy_result["detailed_flags"].values())
+    print(f"Discrepancy vector generated: {discrepancy_vector}")
 
-    # Step 4: Build Gemini reasoning prompt
+    # ---------------------- Step 4: Prepare Gemini reasoning prompt ----------------------
     comparison_prompt = f"""
     You are an expert financial document auditor. You are given:
 
@@ -356,10 +360,10 @@ async def compare_data(request: CompareRequest, session: AsyncSession = Depends(
     - Return strictly valid JSON in the following structure:
 
     {{
-      "summary": "Short narrative summarizing all key discrepancies between PO and Invoice.",
+      "summary": "Short narrative summarizing key discrepancies between PO and Invoice.",
       "discrepancy": [
         {{
-          "name": "Calculation errors",
+          "name": "Calculation error",
           "details": "Invoice total (13113.28) does not match subtotal + tax - discount (12798.28)."
         }}
       ]
@@ -375,7 +379,6 @@ async def compare_data(request: CompareRequest, session: AsyncSession = Depends(
     {json.dumps(discrepancy_result, indent=2)}
     """
 
-    # Step 5: Call Gemini API
     payload = {
         "contents": [{"parts": [{"text": comparison_prompt}]}],
         "generationConfig": {
@@ -384,26 +387,54 @@ async def compare_data(request: CompareRequest, session: AsyncSession = Depends(
         }
     }
 
+    # ---------------------- Step 5: Call Gemini ----------------------
     try:
         comparison_json = await call_gemini_api(COMPARISON_MODEL, payload)
-        print(comparison_json)
+        comparison_json["vendor_id"] = invoice_record.vendor_id or po_record.vendor_id
         validated_report = CompareResponse(**comparison_json)
 
-        # Step 6: Store the comparison result
+        # ---------------------- Step 6: Store CompareResult ----------------------
         db_cmp = CompareResponseDB(
+            vendor_id=validated_report.vendor_id,
             discrepancy=[i.model_dump() for i in validated_report.discrepancy],
+            discrepancy_vector=discrepancy_vector,
             summary=validated_report.summary,
             invoice_id=invoice_record.id,
+            po_id=po_record.id,
             created_by=invoice_record.created_by,
         )
         session.add(db_cmp)
         await session.commit()
 
-        return validated_report
+        # ---------------------- Step 7: Create report (summary + full data) ----------------------
+        initial_messages = [
+            {
+                "role": "server",
+                "content": (
+                    f"**Summary:** {validated_report.summary}\n\n"
+                    f"**Purchase Order Data:**\n```json\n{json.dumps(po_data, indent=2)}\n```\n\n"
+                    f"**Invoice Data:**\n```json\n{json.dumps(invoice_data, indent=2)}\n```"
+                ),
+            }
+        ]
+
+        new_report = ReportDB(
+            messages=initial_messages,
+            created_by=invoice_record.created_by,
+        )
+
+        session.add(new_report)
+        await session.commit()
+
+        return {
+            **validated_report.model_dump(),
+            "report_id": new_report.id
+        }
 
     except Exception as e:
         print(f"Comparison failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Data comparison failed: {str(e)}")
+
 
 @router.get("/eda-summary/{user_id}")
 async def eda_summary(user_id: int, session: AsyncSession = Depends(get_async_session)):
@@ -444,18 +475,8 @@ async def calculate_vendor_vps(
         raise HTTPException(status_code=400, detail="Invalid discrepancy format in comparison record.")
 
     # 2️⃣ Convert discrepancy data to 82-length binary vector
-    discrepancy_vector = [0] * 82
-    for entry in comparison.discrepancy:
-        if isinstance(entry, dict) and "index" in entry and "value" in entry:
-            idx = entry["index"]
-            val = entry["value"]
-            if 0 <= idx < 82:
-                discrepancy_vector[idx] = int(val)
-
+    discrepancy_vector = comparison.discrepancy_vector
     # Validate
-    if len(discrepancy_vector) != 82:
-        raise HTTPException(status_code=400, detail="Discrepancy vector must be 82-length.")
-
     # 3️⃣ Compute VPS and update DB
     vps_score = await compute_vps_from_compare_data(
         session,
@@ -468,13 +489,14 @@ async def calculate_vendor_vps(
 
     # 4️⃣ Fetch latest stored VPS record
     result = await session.execute(
-        f"""
-        SELECT vendor_id, persona, vps_score, aggregated_risk, last_updated
-        FROM vendor_vps
-        WHERE vendor_id='{comparison.vendor_id}' AND persona='{DEFAULT_PERSONA}'
-        ORDER BY last_updated DESC
-        LIMIT 1
-        """
+        text("""
+            SELECT vendor_id, persona, vps_score, aggregated_risk, last_updated
+            FROM vendor_vps
+            WHERE vendor_id = :vendor_id AND persona = :persona
+            ORDER BY last_updated DESC
+            LIMIT 1
+        """),
+        {"vendor_id": comparison.vendor_id, "persona": "margin"}  # since persona is fixed
     )
     row = result.first()
     if not row:
@@ -491,3 +513,103 @@ async def calculate_vendor_vps(
 @router.get("/")
 def read_root():
     return {"message": "AI Document Reconciliation API is running."}
+
+
+# --------------------------- REPORTS ROUTES ---------------------------
+@router.get("/reports")
+async def list_reports(
+    session: AsyncSession = Depends(get_async_session),
+):
+    result = await session.execute(select(ReportDB))
+    reports = result.scalars().all()
+    return [
+        {
+            "id": r.id,
+            "messages": r.messages,
+            "created_by": r.created_by,
+            "created_at": r.created_at,
+        }
+        for r in reports
+    ]
+
+
+@router.get("/reports/{report_id}")
+async def get_report(
+    report_id: int,
+    session: AsyncSession = Depends(get_async_session),
+):
+    report = await session.get(ReportDB, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail=f"Report with ID {report_id} not found.")
+    return {
+        "id": report.id,
+        "messages": report.messages,
+        "created_by": report.created_by,
+        "created_at": report.created_at,
+    }
+
+class MessageRequest(BaseModel):
+    role: str = Field(..., description="Message sender role: 'user' or 'server'")
+    content: str = Field(..., description="The message content text")
+
+class MessageResponse(BaseModel):
+    reply: str = Field(..., description="Gemini's response text")
+
+
+@router.post("/message/{report_id}", response_model=MessageResponse)
+async def continue_report_chat(
+    report_id: int,
+    message: MessageRequest,
+    session: AsyncSession = Depends(get_async_session),
+):
+    """
+    Continues the conversation for a given report using Gemini API.
+    The full message history is used as context.
+    """
+    # 1️⃣ Fetch report
+    report = await session.get(ReportDB, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail=f"Report {report_id} not found")
+
+    # 2️⃣ Append new message from user
+    report.messages.append({"role": message.role, "content": message.content})
+    await session.commit()
+
+    # 3️⃣ Prepare chat-style Gemini prompt
+    context_messages = "\n".join(
+        [f"{m['role'].upper()}: {m['content']}" for m in report.messages]
+    )
+
+    prompt = f"""
+    You are an intelligent financial audit assistant continuing a report discussion.
+
+    Below is the full conversation so far between the system and the user.
+    Use context to generate a concise, accurate, professional reply.
+
+    Conversation:
+    {context_messages}
+
+    Respond in natural, human-like language (no JSON unless requested).
+    """
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.4,
+            "maxOutputTokens": 400,
+        },
+    }
+
+    # 4️⃣ Send to Gemini
+    try:
+        gemini_reply = await call_gemini_api(COMPARISON_MODEL, payload)
+        reply_text = gemini_reply.get("text") or str(gemini_reply)
+
+        # 5️⃣ Append Gemini’s reply as a new server message
+        report.messages.append({"role": "server", "content": reply_text})
+        await session.commit()
+
+        return {"reply": reply_text}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gemini message failed: {str(e)}")
