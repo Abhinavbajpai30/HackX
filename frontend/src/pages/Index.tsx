@@ -139,7 +139,7 @@ const Index = () => {
 
         {/* Hero Section */}
         <section className="relative overflow-hidden text-center">
-          <div className="relative container mx-auto px-6 text-center">
+          <div className="relative container mt-24 mx-auto px-6 text-center">
             <h1 className="font-serif text-6xl md:text-7xl font-bold text-foreground mb-6 leading-relaxed mb-6">
               Vaanika Instant
               <br />
