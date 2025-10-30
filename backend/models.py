@@ -12,15 +12,9 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
-from fastapi_users.db import SQLAlchemyBaseUserTable
 from datetime import datetime
 
 Base = declarative_base()
-
-
-class UserTable(SQLAlchemyBaseUserTable[int], Base):
-    __tablename__ = "user"
-    id = Column(Integer, primary_key=True, index=True)
 
 # ---------------------- ABSTRACT BASE MODEL -------------------------
 class DocumentDataDB:
@@ -77,7 +71,7 @@ class DocumentDataDB:
 
     is_invoice = Column(Boolean, nullable=False, default=False)
 
-    created_by = Column(Integer, ForeignKey("user.id"), nullable=True)
+    created_by = Column(Integer, ForeignKey("gmail_users.id"), nullable=True)
 
     @declared_attr
     def __tablename__(cls):
@@ -97,6 +91,13 @@ class PurchaseOrderDB(DocumentDataDB, Base):
         back_populates="related_po",
         cascade="all, delete-orphan",
     )
+    
+    # Relationship to user
+    user = relationship(
+        "GmailUser",
+        back_populates="purchase_orders",
+        foreign_keys="[PurchaseOrderDB.created_by]",
+    )
 
 
 # --------------------------- INVOICE TABLE --------------------------
@@ -111,6 +112,13 @@ class InvoiceDB(DocumentDataDB, Base):
         back_populates="related_invoices",
         foreign_keys=[po_number],
     )
+    
+    # Relationship to user
+    user = relationship(
+        "GmailUser",
+        back_populates="invoices",
+        foreign_keys="[InvoiceDB.created_by]",
+    )
 
 
 # --------------------------- COMPARISON TABLE -----------------------
@@ -123,7 +131,7 @@ class CompareResponseDB(Base):
 
     invoice_id = Column(Integer, ForeignKey("invoices.id"), nullable=True)
     po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
-    created_by = Column(Integer, ForeignKey("user.id"), nullable=True)
+    created_by = Column(Integer, ForeignKey("gmail_users.id"), nullable=True)
 
 
 # --------------------------- GMAIL INTEGRATION TABLES -----------------------
@@ -139,6 +147,21 @@ class GmailUser(Base):
     last_login = Column(DateTime, nullable=True)
     last_sync = Column(DateTime(timezone=True), nullable=True)
     logged_out_at = Column(DateTime, nullable=True)
+    
+    # Relationships to documents
+    invoices = relationship(
+        "InvoiceDB",
+        back_populates="user",
+        foreign_keys="InvoiceDB.created_by",
+        cascade="all, delete-orphan",
+    )
+    
+    purchase_orders = relationship(
+        "PurchaseOrderDB",
+        back_populates="user",
+        foreign_keys="PurchaseOrderDB.created_by",
+        cascade="all, delete-orphan",
+    )
 
 
 class GmailEmail(Base):

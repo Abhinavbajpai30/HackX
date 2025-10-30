@@ -6,6 +6,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { ArrowLeft, Info } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ChatMessage } from "@/components/chat/ChatMessage";
+import { useAuthValidation } from "@/hooks/use-auth-validation";
 
 type Discrepancy = {
   name: string;
@@ -20,6 +21,7 @@ type CompareReport = {
 export default function Report() {
   const location = useLocation();
   const navigate = useNavigate();
+  useAuthValidation();
   const report = (location.state as { report?: CompareReport } | null)?.report;
 
   // Fallback if navigated directly without state

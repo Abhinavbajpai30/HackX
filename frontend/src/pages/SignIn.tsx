@@ -1,10 +1,12 @@
 import { Particles } from "@/components/ui/particles";
 import { ParticleButton } from "@/components/ui/particle-button";
 import { useCallback } from "react";
+import { useAuthValidation } from "@/hooks/use-auth-validation";
 
 const BACKEND_URL = (import.meta as any).env?.VITE_BACKEND_URL || "http://localhost:8000";
 
 const SignIn = () => {
+  useAuthValidation();
   const startGoogleLogin = useCallback(async () => {
     try {
       const res = await fetch(`${BACKEND_URL}/auth/login`, {
