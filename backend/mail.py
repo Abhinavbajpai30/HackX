@@ -11,8 +11,10 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo import MongoClient
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, delete
+from db import get_async_session
+from models import GmailUser, GmailEmail, OAuthState, GmailSenderStat, EmailEvent
 import os
 import json
 from typing import Optional
@@ -37,8 +39,6 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "your-client-id.apps.googleuser
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "your-client-secret")
 REDIRECT_URI = os.getenv("REDIRECT_URI", "http://localhost:8000/auth/callback")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
-MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
-DATABASE_NAME = os.getenv("DATABASE_NAME", "gmail_app")
 
 # CORS Configuration
 ALLOWED_ORIGINS = os.getenv(
@@ -75,33 +75,10 @@ CLIENT_CONFIG = {
     }
 }
 
-# MongoDB client
-mongo_client: AsyncIOMotorClient = None
-db = None
-
-
 @app.on_event("startup")
-async def startup_db_client():
-    """Initialize MongoDB connection on startup"""
-    global mongo_client, db
-    mongo_client = AsyncIOMotorClient(MONGODB_URL)
-    db = mongo_client[DATABASE_NAME]
-    
-    # Create indexes for better performance
-    await db.users.create_index("email", unique=True)
-    await db.emails.create_index("user_email")
-    await db.emails.create_index("message_id", unique=True)
-    await db.emails.create_index([("user_email", 1), ("internal_date", -1)])
-    
-    print(f"Connected to MongoDB: {MONGODB_URL}")
-
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    """Close MongoDB connection on shutdown"""
-    if mongo_client:
-        mongo_client.close()
-        print("MongoDB connection closed")
+async def startup_event():
+    # Tables are created in backend/main.py
+    print("Postgres ready via SQLAlchemy AsyncSession")
 
 
 def credentials_to_dict(credentials):
@@ -130,11 +107,11 @@ def dict_to_credentials(creds_dict):
 
 @app.get("/")
 async def root():
-    return {"message": "Google OAuth & Gmail API Server with MongoDB"}
+    return {"message": "Google OAuth & Gmail API Server with Postgres"}
 
 
 @app.get("/auth/login")
-async def login():
+async def login(session: AsyncSession = Depends(get_async_session)):
     """Initiate OAuth flow"""
     flow = Flow.from_client_config(
         CLIENT_CONFIG,
@@ -148,27 +125,31 @@ async def login():
         prompt='consent'
     )
     
-    # Store state in database for verification
-    await db.oauth_states.insert_one({
-        "state": state,
-        "created_at": datetime.utcnow(),
-        "expires_at": datetime.utcnow() + timedelta(minutes=10)
-    })
+    # Store state in Postgres for verification
+    state_row = OAuthState(
+        state=state,
+        created_at=datetime.utcnow(),
+        expires_at=datetime.utcnow() + timedelta(minutes=10),
+    )
+    session.add(state_row)
+    await session.commit()
     
     return {"authorization_url": authorization_url, "state": state}
 
 
 @app.get("/auth/callback")
-async def auth_callback(code: str, state: str):
+async def auth_callback(code: str, state: str, session: AsyncSession = Depends(get_async_session)):
     """Handle OAuth callback"""
     try:
         # Verify state
-        state_doc = await db.oauth_states.find_one({"state": state})
-        if not state_doc or state_doc['expires_at'] < datetime.utcnow():
+        res = await session.execute(select(OAuthState).where(OAuthState.state == state))
+        state_row = res.scalar_one_or_none()
+        if not state_row or state_row.expires_at < datetime.utcnow():
             raise HTTPException(status_code=400, detail="Invalid or expired state")
         
         # Delete used state
-        await db.oauth_states.delete_one({"state": state})
+        await session.execute(delete(OAuthState).where(OAuthState.state == state))
+        await session.commit()
         
         flow = Flow.from_client_config(
             CLIENT_CONFIG,
@@ -186,25 +167,25 @@ async def auth_callback(code: str, state: str):
         
         user_email = user_info.get('email')
         
-        # Store/update user in MongoDB
-        user_doc = {
-            "email": user_email,
-            "user_info": user_info,
-            "credentials": credentials_to_dict(credentials),
-            "watch_expiration": None,
-            "history_id": None,
-            "last_login": datetime.utcnow(),
-            "updated_at": datetime.utcnow()
-        }
-        
-        await db.users.update_one(
-            {"email": user_email},
-            {"$set": user_doc},
-            upsert=True
-        )
+        # Store/update user in Postgres
+        res_user = await session.execute(select(GmailUser).where(GmailUser.email == user_email))
+        user_row = res_user.scalar_one_or_none()
+        if not user_row:
+            user_row = GmailUser(
+                email=user_email,
+                user_info=user_info,
+                credentials=credentials_to_dict(credentials),
+                last_login=datetime.utcnow(),
+            )
+            session.add(user_row)
+        else:
+            user_row.user_info = user_info
+            user_row.credentials = credentials_to_dict(credentials)
+            user_row.last_login = datetime.utcnow()
+        await session.commit()
         
         # Set up Gmail watch for this user
-        await setup_gmail_watch(user_email)
+        await setup_gmail_watch(user_email, session)
         
         return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?email={user_email}")
         
@@ -212,7 +193,7 @@ async def auth_callback(code: str, state: str):
         raise HTTPException(status_code=400, detail=f"Authentication failed: {str(e)}")
 
 
-async def setup_gmail_watch(user_email: str):
+async def setup_gmail_watch(user_email: str, session: AsyncSession = Depends(get_async_session)):
     """
     Set up Gmail Push Notifications using Pub/Sub
     
@@ -226,11 +207,12 @@ async def setup_gmail_watch(user_email: str):
     """
     
     try:
-        user = await db.users.find_one({"email": user_email})
+        res_user = await session.execute(select(GmailUser).where(GmailUser.email == user_email))
+        user = res_user.scalar_one_or_none()
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        credentials = dict_to_credentials(user["credentials"])
+        credentials = dict_to_credentials(user.credentials)
         service = build('gmail', 'v1', credentials=credentials)
         
         # Watch request - monitors inbox for new messages
@@ -241,18 +223,11 @@ async def setup_gmail_watch(user_email: str):
         
         response = service.users().watch(userId='me', body=request).execute()
         
-        # Update user document with watch info
+        # Update user with watch info
         expiration = datetime.utcnow() + timedelta(milliseconds=int(response['expiration']))
-        await db.users.update_one(
-            {"email": user_email},
-            {
-                "$set": {
-                    "watch_expiration": expiration,
-                    "history_id": response['historyId'],
-                    "updated_at": datetime.utcnow()
-                }
-            }
-        )
+        user.watch_expiration = expiration
+        user.history_id = response['historyId']
+        await session.commit()
         
         print(f"Gmail watch set up for {user_email}, expires at {expiration}")
         return response
@@ -263,7 +238,7 @@ async def setup_gmail_watch(user_email: str):
 
 
 @app.post("/webhook/gmail")
-async def gmail_webhook(request: Request):
+async def gmail_webhook(request: Request, session: AsyncSession = Depends(get_async_session)):
     """
     Webhook endpoint for Gmail push notifications
     
@@ -294,7 +269,7 @@ async def gmail_webhook(request: Request):
             
             # Process the new emails in the background
             if email_address and history_id:
-                await process_new_emails(email_address, str(history_id))
+                await process_new_emails(email_address, str(history_id), session)
         else:
             print("⚠️ No 'data' field in message")
 
@@ -308,21 +283,22 @@ async def gmail_webhook(request: Request):
         return {"status": "error", "detail": str(e)}
 
 
-async def process_new_emails(email_address: str, new_history_id: str):
+async def process_new_emails(email_address: str, new_history_id: str, session: AsyncSession):
     """
     Process new emails by fetching history since last check
     """
     
-    user = await db.users.find_one({"email": email_address})
+    res_user = await session.execute(select(GmailUser).where(GmailUser.email == email_address))
+    user = res_user.scalar_one_or_none()
     if not user:
         print(f"No user found for {email_address}")
         return
     
     try:
-        credentials = dict_to_credentials(user["credentials"])
+        credentials = dict_to_credentials(user.credentials)
         service = build('gmail', 'v1', credentials=credentials)
         
-        last_history_id = user.get("history_id")
+        last_history_id = user.history_id
         
         if not last_history_id:
             print("No history_id found, fetching latest emails instead")
@@ -334,13 +310,12 @@ async def process_new_emails(email_address: str, new_history_id: str):
             
             if messages_response.get('messages'):
                 message_id = messages_response['messages'][0]['id']
-                await fetch_and_store_email(service, email_address, message_id)
+                await fetch_and_store_email(service, email_address, message_id, session)
             
             # Update history_id for next time
-            await db.users.update_one(
-                {"email": email_address},
-                {"$set": {"history_id": new_history_id, "last_sync": datetime.now(UTC)}}
-            )
+            user.history_id = new_history_id
+            user.last_sync = datetime.now(UTC)
+            await session.commit()
             return
         
         print(f"Fetching history from {last_history_id} to {new_history_id}")
@@ -353,10 +328,9 @@ async def process_new_emails(email_address: str, new_history_id: str):
         ).execute()
         
         # Update stored history_id
-        await db.users.update_one(
-            {"email": email_address},
-            {"$set": {"history_id": new_history_id, "last_sync": datetime.now(UTC)}}
-        )
+        user.history_id = new_history_id
+        user.last_sync = datetime.now(UTC)
+        await session.commit()
         
         if 'history' not in history_response:
             print("No new messages in history")
@@ -372,7 +346,7 @@ async def process_new_emails(email_address: str, new_history_id: str):
                     message_id = message_data['id']
                     
                     print(f"Processing message ID: {message_id}")
-                    await fetch_and_store_email(service, email_address, message_id)
+                    await fetch_and_store_email(service, email_address, message_id, session)
         
     except HttpError as error:
         print(f"An error occurred fetching emails: {error}")
@@ -380,8 +354,8 @@ async def process_new_emails(email_address: str, new_history_id: str):
         traceback.print_exc()
 
 
-async def fetch_and_store_email(service, email_address: str, message_id: str):
-    """Fetch full email details and store in MongoDB"""
+async def fetch_and_store_email(service, email_address: str, message_id: str, session: AsyncSession):
+    """Fetch full email details and store in Postgres"""
     try:
         # Fetch full message details with metadata and body
         message = service.users().messages().get(
@@ -417,19 +391,11 @@ async def fetch_and_store_email(service, email_address: str, message_id: str):
         if email_info.get('attachments'):
             print(f"   - attachments data: {json.dumps(email_info['attachments'], indent=6)}")
         
-        # Store email in MongoDB
-        await store_email(email_info)
-        
-        # Verify what was stored
-        stored = await db.emails.find_one({"message_id": message_id})
-        if stored:
-            print(f"✅ Verified stored in database:")
-            print(f"   - has_attachments field: {stored.get('has_attachments', False)}")
-            print(f"   - attachments field exists: {'attachments' in stored}")
-            print(f"   - attachments content: {json.dumps(stored.get('attachments', []), indent=6)}")
+        # Store email in Postgres
+        await store_email(email_info, session)
         
         # Call custom handler
-        await handle_new_email(email_address, email_info, message)
+        await handle_new_email(email_address, email_info, message, session)
         
         print(f"✅ Stored email: {email_info['subject']}")
         print(f"📧 From: {email_info['from']}")
@@ -563,19 +529,20 @@ def extract_attachments_info(message):
 
 
 @app.post("/user/emails/{message_id}/resync")
-async def resync_email(email: str, message_id: str):
+async def resync_email(email: str, message_id: str, session: AsyncSession = Depends(get_async_session)):
     """Re-fetch and update an email from Gmail (useful for fixing missing data)"""
     
-    user = await db.users.find_one({"email": email})
+    res_user = await session.execute(select(GmailUser).where(GmailUser.email == email))
+    user = res_user.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
     try:
-        credentials = dict_to_credentials(user["credentials"])
+        credentials = dict_to_credentials(user.credentials)
         service = build('gmail', 'v1', credentials=credentials)
         
         # Fetch the email again
-        await fetch_and_store_email(service, email, message_id)
+        await fetch_and_store_email(service, email, message_id, session)
         
         return {"status": "success", "message": f"Email {message_id} re-synced"}
         
@@ -585,25 +552,44 @@ async def resync_email(email: str, message_id: str):
 
 # New endpoint to get a single email with full content
 @app.get("/user/emails/{message_id}")
-async def get_email_details(email: str, message_id: str):
+async def get_email_details(email: str, message_id: str, session: AsyncSession = Depends(get_async_session)):
     """Get full details of a specific email including body and attachments"""
     
-    user = await db.users.find_one({"email": email})
+    res_user = await session.execute(select(GmailUser).where(GmailUser.email == email))
+    user = res_user.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    email_doc = await db.emails.find_one({
-        "user_email": email,
-        "message_id": message_id
-    })
+    res_email = await session.execute(
+        select(GmailEmail).where(GmailEmail.user_email == email, GmailEmail.message_id == message_id)
+    )
+    email_doc = res_email.scalar_one_or_none()
     
     if not email_doc:
         raise HTTPException(status_code=404, detail="Email not found")
     
-    # Convert ObjectId to string
-    email_doc['_id'] = str(email_doc['_id'])
-    
-    return email_doc
+    return {
+        "user_email": email_doc.user_email,
+        "message_id": email_doc.message_id,
+        "thread_id": email_doc.thread_id,
+        "from": email_doc.from_addr,
+        "to": email_doc.to_addr,
+        "subject": email_doc.subject,
+        "date": email_doc.date,
+        "snippet": email_doc.snippet,
+        "labels": email_doc.labels,
+        "internal_date": email_doc.internal_date,
+        "received_at": email_doc.received_at.isoformat() if email_doc.received_at else None,
+        "body_plain": email_doc.body_plain,
+        "body_html": email_doc.body_html,
+        "body_snippet": email_doc.body_snippet,
+        "has_attachments": email_doc.has_attachments,
+        "attachments": email_doc.attachments,
+        "priority": email_doc.priority,
+        "is_important": email_doc.is_important,
+        "category": email_doc.category,
+        "sender_domain": email_doc.sender_domain,
+    }
 
 
 # New endpoint to download attachment
@@ -611,7 +597,8 @@ async def get_email_details(email: str, message_id: str):
 async def download_attachment(
     message_id: str,
     attachment_filename: str,
-    email: str = None
+    email: str = None,
+    session: AsyncSession = Depends(get_async_session),
 ):
     """Download a specific attachment from an email by filename"""
     
@@ -619,20 +606,22 @@ async def download_attachment(
     
     # If email not provided as query param, find it from the message
     if not email:
-        email_doc = await db.emails.find_one({"message_id": message_id})
+        res_email = await session.execute(select(GmailEmail).where(GmailEmail.message_id == message_id))
+        email_doc = res_email.scalar_one_or_none()
         if not email_doc:
             print(f"❌ Email document not found for message_id: {message_id}")
             raise HTTPException(status_code=404, detail="Email not found")
-        email = email_doc['user_email']
+        email = email_doc.user_email
         print(f"✅ Found user email: {email}")
     
-    user = await db.users.find_one({"email": email})
+    res_user = await session.execute(select(GmailUser).where(GmailUser.email == email))
+    user = res_user.scalar_one_or_none()
     if not user:
         print(f"❌ User not found: {email}")
         raise HTTPException(status_code=404, detail="User not found")
     
     try:
-        credentials = dict_to_credentials(user["credentials"])
+        credentials = dict_to_credentials(user.credentials)
         service = build('gmail', 'v1', credentials=credentials)
         
         # Fetch the full message again to get attachment IDs
@@ -725,20 +714,52 @@ def extract_email_info(message):
     }
 
 
-async def store_email(email_info: dict):
-    """Store email in MongoDB"""
+async def store_email(email_info: dict, session: AsyncSession):
+    """Store email in Postgres"""
     try:
-        await db.emails.update_one(
-            {"message_id": email_info['message_id']},
-            {"$set": email_info},
-            upsert=True
-        )
+        res = await session.execute(select(GmailEmail).where(GmailEmail.message_id == email_info['message_id']))
+        row = res.scalar_one_or_none()
+        if not row:
+            row = GmailEmail(
+                user_email=email_info.get('user_email'),
+                message_id=email_info.get('message_id'),
+                thread_id=email_info.get('thread_id'),
+                from_addr=email_info.get('from'),
+                to_addr=email_info.get('to'),
+                subject=email_info.get('subject'),
+                date=email_info.get('date'),
+                snippet=email_info.get('snippet'),
+                labels=email_info.get('labels') or [],
+                internal_date=str(email_info.get('internal_date') or ''),
+                body_plain=email_info.get('body_plain'),
+                body_html=email_info.get('body_html'),
+                body_snippet=email_info.get('body_snippet'),
+                has_attachments=email_info.get('has_attachments', False),
+                attachments=email_info.get('attachments') or [],
+            )
+            session.add(row)
+        else:
+            row.user_email = email_info.get('user_email')
+            row.thread_id = email_info.get('thread_id')
+            row.from_addr = email_info.get('from')
+            row.to_addr = email_info.get('to')
+            row.subject = email_info.get('subject')
+            row.date = email_info.get('date')
+            row.snippet = email_info.get('snippet')
+            row.labels = email_info.get('labels') or []
+            row.internal_date = str(email_info.get('internal_date') or '')
+            row.body_plain = email_info.get('body_plain')
+            row.body_html = email_info.get('body_html')
+            row.body_snippet = email_info.get('body_snippet')
+            row.has_attachments = email_info.get('has_attachments', False)
+            row.attachments = email_info.get('attachments') or []
+        await session.commit()
         print(f"Stored email: {email_info['subject']}")
     except Exception as e:
         print(f"Error storing email: {e}")
 
 
-async def handle_new_email(user_email: str, email_info: dict, full_message: dict):
+async def handle_new_email(user_email: str, email_info: dict, full_message: dict, session: AsyncSession):
     """
     CUSTOM EMAIL HANDLER - Implement your business logic here
     
@@ -781,10 +802,12 @@ async def handle_new_email(user_email: str, email_info: dict, full_message: dict
     is_important = any(keyword in subject for keyword in ['urgent', 'important', 'asap', 'critical'])
     
     if is_important:
-        await db.emails.update_one(
-            {"message_id": email_info['message_id']},
-            {"$set": {"priority": "high", "is_important": True}}
-        )
+        res_email = await session.execute(select(GmailEmail).where(GmailEmail.message_id == email_info['message_id']))
+        row = res_email.scalar_one_or_none()
+        if row:
+            row.priority = "high"
+            row.is_important = True
+            await session.commit()
         print(f"⚠️  High priority email detected: {email_info['subject']}")
         
         # TODO: Send push notification to user
@@ -796,20 +819,22 @@ async def handle_new_email(user_email: str, email_info: dict, full_message: dict
     # Example 2: Categorize by sender domain
     if '@' in sender:
         domain = sender.split('@')[1].split('>')[0]
-        await db.emails.update_one(
-            {"message_id": email_info['message_id']},
-            {"$set": {"sender_domain": domain}}
-        )
-        
+        res_email = await session.execute(select(GmailEmail).where(GmailEmail.message_id == email_info['message_id']))
+        row = res_email.scalar_one_or_none()
+        if row:
+            row.sender_domain = domain
         # Track sender statistics
-        await db.sender_stats.update_one(
-            {"user_email": user_email, "domain": domain},
-            {
-                "$inc": {"email_count": 1},
-                "$set": {"last_email_date": datetime.utcnow()}
-            },
-            upsert=True
+        res_stat = await session.execute(
+            select(GmailSenderStat).where(GmailSenderStat.user_email == user_email, GmailSenderStat.domain == domain)
         )
+        stat = res_stat.scalar_one_or_none()
+        if not stat:
+            stat = GmailSenderStat(user_email=user_email, domain=domain, email_count=1, last_email_date=datetime.utcnow())
+            session.add(stat)
+        else:
+            stat.email_count = (stat.email_count or 0) + 1
+            stat.last_email_date = datetime.utcnow()
+        await session.commit()
     
     # Example 3: Extract and store attachments info
     if 'parts' in full_message['payload']:
@@ -823,28 +848,32 @@ async def handle_new_email(user_email: str, email_info: dict, full_message: dict
                 })
         
         if attachments:
-            await db.emails.update_one(
-                {"message_id": email_info['message_id']},
-                {"$set": {"attachments": attachments, "has_attachments": True}}
-            )
+            res_email = await session.execute(select(GmailEmail).where(GmailEmail.message_id == email_info['message_id']))
+            row = res_email.scalar_one_or_none()
+            if row:
+                row.attachments = attachments
+                row.has_attachments = True
+                await session.commit()
             print(f"📎 Email has {len(attachments)} attachment(s)")
     
     # Example 4: Auto-tag promotional emails
     if any(keyword in subject for keyword in ['sale', 'discount', 'offer', 'deal']):
-        await db.emails.update_one(
-            {"message_id": email_info['message_id']},
-            {"$set": {"category": "promotional"}}
-        )
+        res_email = await session.execute(select(GmailEmail).where(GmailEmail.message_id == email_info['message_id']))
+        row = res_email.scalar_one_or_none()
+        if row:
+            row.category = "promotional"
+            await session.commit()
     
     # Example 5: Log email event for analytics
-    await db.email_events.insert_one({
-        "user_email": user_email,
-        "event_type": "email_received",
-        "message_id": email_info['message_id'],
-        "sender": email_info['from'],
-        "subject": email_info['subject'],
-        "timestamp": datetime.utcnow()
-    })
+    session.add(EmailEvent(
+        user_email=user_email,
+        event_type="email_received",
+        message_id=email_info['message_id'],
+        sender=email_info.get('from'),
+        subject=email_info.get('subject'),
+        timestamp=datetime.utcnow(),
+    ))
+    await session.commit()
     
     # TODO: Add your custom business logic here
     # - Send to AI for summarization
@@ -856,120 +885,159 @@ async def handle_new_email(user_email: str, email_info: dict, full_message: dict
 
 
 @app.get("/user/emails")
-async def get_user_emails(email: str, skip: int = 0, limit: int = 20):
-    """Fetch user's emails from MongoDB with pagination"""
+async def get_user_emails(email: str, skip: int = 0, limit: int = 20, session: AsyncSession = Depends(get_async_session)):
+    """Fetch user's emails from Postgres with pagination"""
     
-    user = await db.users.find_one({"email": email})
+    res_user = await session.execute(select(GmailUser).where(GmailUser.email == email))
+    user = res_user.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Fetch emails from MongoDB
-    cursor = db.emails.find(
-        {"user_email": email}
-    ).sort("internal_date", -1).skip(skip).limit(limit)
-    
-    emails = await cursor.to_list(length=limit)
-    
-    # Convert ObjectId to string for JSON serialization
-    for email_doc in emails:
-        email_doc['_id'] = str(email_doc['_id'])
-    
-    # Get total count
-    total = await db.emails.count_documents({"user_email": email})
-    
-    return {
-        "emails": emails,
-        "total": total,
-        "skip": skip,
-        "limit": limit
-    }
+    res_emails = await session.execute(
+        select(GmailEmail)
+        .where(GmailEmail.user_email == email)
+        .order_by(GmailEmail.internal_date.desc().nullslast())
+        .offset(skip)
+        .limit(limit)
+    )
+    emails_rows = res_emails.scalars().all()
+    emails = [
+        {
+            "user_email": r.user_email,
+            "message_id": r.message_id,
+            "subject": r.subject,
+            "from": r.from_addr,
+            "to": r.to_addr,
+            "snippet": r.snippet,
+            "internal_date": r.internal_date,
+            "has_attachments": r.has_attachments,
+            "received_at": r.received_at.isoformat() if r.received_at else None,
+        }
+        for r in emails_rows
+    ]
+    total = len(
+        (
+            await session.execute(
+                select(GmailEmail).where(GmailEmail.user_email == email)
+            )
+        ).scalars().all()
+    )
+    return {"emails": emails, "total": total, "skip": skip, "limit": limit}
 
 
 @app.get("/user/emails/search")
-async def search_emails(email: str, query: str, limit: int = 20):
+async def search_emails(email: str, query: str, limit: int = 20, session: AsyncSession = Depends(get_async_session)):
     """Search user's emails by subject or sender"""
     
-    user = await db.users.find_one({"email": email})
+    res_user = await session.execute(select(GmailUser).where(GmailUser.email == email))
+    user = res_user.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    # Text search in subject and sender
-    cursor = db.emails.find({
-        "user_email": email,
-        "$or": [
-            {"subject": {"$regex": query, "$options": "i"}},
-            {"from": {"$regex": query, "$options": "i"}}
-        ]
-    }).sort("internal_date", -1).limit(limit)
-    
-    emails = await cursor.to_list(length=limit)
-    
-    for email_doc in emails:
-        email_doc['_id'] = str(email_doc['_id'])
-    
+    q = f"%{query}%"
+    res_emails = await session.execute(
+        select(GmailEmail)
+        .where(
+            GmailEmail.user_email == email,
+            (GmailEmail.subject.ilike(q)) | (GmailEmail.from_addr.ilike(q)),
+        )
+        .order_by(GmailEmail.internal_date.desc().nullslast())
+        .limit(limit)
+    )
+    emails_rows = res_emails.scalars().all()
+    emails = [
+        {
+            "user_email": r.user_email,
+            "message_id": r.message_id,
+            "subject": r.subject,
+            "from": r.from_addr,
+            "to": r.to_addr,
+            "snippet": r.snippet,
+            "internal_date": r.internal_date,
+            "has_attachments": r.has_attachments,
+            "received_at": r.received_at.isoformat() if r.received_at else None,
+        }
+        for r in emails_rows
+    ]
     return {"emails": emails, "query": query}
 
 
 @app.get("/user/status")
-async def get_user_status(email: str):
+async def get_user_status(email: str, session: AsyncSession = Depends(get_async_session)):
     """Check user's authentication and watch status"""
     
-    user = await db.users.find_one({"email": email})
+    res_user = await session.execute(select(GmailUser).where(GmailUser.email == email))
+    user = res_user.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
     return {
         "email": email,
         "authenticated": True,
-        "watch_active": user.get("watch_expiration") is not None,
-        "watch_expires": user.get("watch_expiration").isoformat() if user.get("watch_expiration") else None,
-        "last_sync": user.get("last_sync").isoformat() if user.get("last_sync") else None,
-        "email_count": await db.emails.count_documents({"user_email": email})
+        "watch_active": user.watch_expiration is not None,
+        "watch_expires": user.watch_expiration.isoformat() if user.watch_expiration else None,
+        "last_sync": user.last_sync.isoformat() if user.last_sync else None,
+        "email_count": len((await session.execute(select(GmailEmail).where(GmailEmail.user_email == email))).scalars().all()),
     }
 
 
 @app.post("/user/refresh-watch")
-async def refresh_watch(email: str):
+async def refresh_watch(email: str, session: AsyncSession = Depends(get_async_session)):
     """Manually refresh Gmail watch (call this before expiration)"""
     
-    user = await db.users.find_one({"email": email})
+    res_user = await session.execute(select(GmailUser).where(GmailUser.email == email))
+    user = res_user.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
     try:
-        await setup_gmail_watch(email)
+        await setup_gmail_watch(email, session)
         return {"status": "success", "message": "Watch refreshed"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/user/analytics")
-async def get_email_analytics(email: str):
+async def get_email_analytics(email: str, session: AsyncSession = Depends(get_async_session)):
     """Get email analytics for user"""
     
-    user = await db.users.find_one({"email": email})
+    res_user = await session.execute(select(GmailUser).where(GmailUser.email == email))
+    user = res_user.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
     # Total emails
-    total_emails = await db.emails.count_documents({"user_email": email})
-    
+    total_emails = len((await session.execute(select(GmailEmail).where(GmailEmail.user_email == email))).scalars().all())
+
     # Important emails
-    important_count = await db.emails.count_documents({
-        "user_email": email,
-        "is_important": True
-    })
-    
+    important_emails = await session.execute(
+        select(GmailEmail).where(GmailEmail.user_email == email, GmailEmail.is_important == True)
+    )
+    important_count = len(important_emails.scalars().all())
+
     # Emails with attachments
-    attachment_count = await db.emails.count_documents({
-        "user_email": email,
-        "has_attachments": True
-    })
-    
+    emails_with_att = await session.execute(
+        select(GmailEmail).where(GmailEmail.user_email == email, GmailEmail.has_attachments == True)
+    )
+    attachment_count = len(emails_with_att.scalars().all())
+
     # Top senders
-    top_senders = await db.sender_stats.find(
-        {"user_email": email}
-    ).sort("email_count", -1).limit(10).to_list(length=10)
+    res_senders = await session.execute(
+        select(GmailSenderStat)
+        .where(GmailSenderStat.user_email == email)
+        .order_by(GmailSenderStat.email_count.desc())
+        .limit(10)
+    )
+    top_senders_rows = res_senders.scalars().all()
+    top_senders = [
+        {
+            "user_email": s.user_email,
+            "domain": s.domain,
+            "email_count": s.email_count,
+            "last_email_date": s.last_email_date.isoformat() if s.last_email_date else None,
+        }
+        for s in top_senders_rows
+    ]
     
     return {
         "total_emails": total_emails,
@@ -980,25 +1048,18 @@ async def get_email_analytics(email: str):
 
 
 @app.delete("/user/logout")
-async def logout(email: str):
+async def logout(email: str, session: AsyncSession = Depends(get_async_session)):
     """Logout user and optionally remove their data"""
     
-    # Remove user session (keep emails for history)
-    result = await db.users.update_one(
-        {"email": email},
-        {
-            "$unset": {
-                "credentials": "",
-                "watch_expiration": "",
-                "history_id": ""
-            },
-            "$set": {"logged_out_at": datetime.utcnow()}
-        }
-    )
-    
-    if result.modified_count == 0:
+    res_user = await session.execute(select(GmailUser).where(GmailUser.email == email))
+    user = res_user.scalar_one_or_none()
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
+    user.credentials = None
+    user.watch_expiration = None
+    user.history_id = None
+    user.logged_out_at = datetime.utcnow()
+    await session.commit()
     return {"status": "success", "message": "User logged out"}
 
 
