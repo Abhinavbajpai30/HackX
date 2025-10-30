@@ -3,6 +3,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from db import get_async_session
+from datetime import datetime
+from vps_utils import compute_vps_from_compare_data
 from models import InvoiceDB, PurchaseOrderDB, CompareResponseDB, GmailUser
 from typing import List, Optional, Dict, Any
 from gemini_utils import (
@@ -403,7 +405,88 @@ async def compare_data(request: CompareRequest, session: AsyncSession = Depends(
         print(f"Comparison failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Data comparison failed: {str(e)}")
 
+@router.get("/eda-summary/{user_id}")
+async def eda_summary(user_id: int, session: AsyncSession = Depends(get_async_session)):
+    from eda_utils import get_user_eda
+    eda_data = await get_user_eda(session, user_id)
+    return eda_data
 
+class VPSRequest(BaseModel):
+    comparison_id: int = Field(..., description="ID of comparison record in 'comparisons' table")
+
+
+class VPSResponse(BaseModel):
+    vendor_id: str
+    persona: str
+    vps_score: float
+    aggregated_risk: float
+    last_updated: datetime
+
+DEFAULT_PERSONA = "margin"
+
+@router.post("/calculate", response_model=VPSResponse)
+async def calculate_vendor_vps(
+    data: VPSRequest,
+    session: AsyncSession = Depends(get_async_session),
+):
+    """
+    Calculates and stores Vendor Persona Score (VPS) for a vendor using a comparison record.
+    Persona is automatically set to 'compliance'.
+    Applies time-decay when updating the vendor's historical score.
+    """
+    # 1️⃣ Fetch comparison record
+    comparison = await session.get(CompareResponseDB, data.comparison_id)
+    if not comparison:
+        raise HTTPException(status_code=404, detail=f"Comparison ID {data.comparison_id} not found.")
+    if not comparison.vendor_id:
+        raise HTTPException(status_code=400, detail="Comparison record missing vendor_id.")
+    if not comparison.discrepancy or not isinstance(comparison.discrepancy, list):
+        raise HTTPException(status_code=400, detail="Invalid discrepancy format in comparison record.")
+
+    # 2️⃣ Convert discrepancy data to 82-length binary vector
+    discrepancy_vector = [0] * 82
+    for entry in comparison.discrepancy:
+        if isinstance(entry, dict) and "index" in entry and "value" in entry:
+            idx = entry["index"]
+            val = entry["value"]
+            if 0 <= idx < 82:
+                discrepancy_vector[idx] = int(val)
+
+    # Validate
+    if len(discrepancy_vector) != 82:
+        raise HTTPException(status_code=400, detail="Discrepancy vector must be 82-length.")
+
+    # 3️⃣ Compute VPS and update DB
+    vps_score = await compute_vps_from_compare_data(
+        session,
+        {
+            "vendor_id": comparison.vendor_id,
+            "discrepancies": discrepancy_vector,
+        },
+        persona=DEFAULT_PERSONA
+    )
+
+    # 4️⃣ Fetch latest stored VPS record
+    result = await session.execute(
+        f"""
+        SELECT vendor_id, persona, vps_score, aggregated_risk, last_updated
+        FROM vendor_vps
+        WHERE vendor_id='{comparison.vendor_id}' AND persona='{DEFAULT_PERSONA}'
+        ORDER BY last_updated DESC
+        LIMIT 1
+        """
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=500, detail="VPS calculation failed to store.")
+
+    return VPSResponse(
+        vendor_id=row.vendor_id,
+        persona=row.persona,
+        vps_score=row.vps_score,
+        aggregated_risk=row.aggregated_risk,
+        last_updated=row.last_updated,
+    )
 
 @router.get("/")
 def read_root():
