@@ -214,7 +214,7 @@ export default function Report() {
         {/* Messages */}
         <section className="pb-40">
           <h3 className="sr-only">Conversation</h3>
-          <div className="space-y-3">
+          <div className="space-y-3 bg-background/50 p-4 rounded-lg">
             {messages.map((m, i) => (
               <div key={i} className="flex">
                 <ChatMessage role={m.role} content={m.content} />
