@@ -36,6 +36,7 @@ app = FastAPI()
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "your-client-id.apps.googleusercontent.com")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "your-client-secret")
 REDIRECT_URI = os.getenv("REDIRECT_URI", "http://localhost:8000/auth/callback")
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 MONGODB_URL = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
 DATABASE_NAME = os.getenv("DATABASE_NAME", "gmail_app")
@@ -443,7 +444,7 @@ async def fetch_and_store_email(service, email_address: str, message_id: str):
                 # Generate download URL using filename (URL-encoded)
                 from urllib.parse import quote
                 encoded_filename = quote(att['filename'])
-                download_url = f"http://localhost:8000/user/emails/{message_id}/attachments/{encoded_filename}"
+                download_url = f"{BASE_URL}/user/emails/{message_id}/attachments/{encoded_filename}"
                 print(f"     🔗 Download: {download_url}")
         
     except HttpError as error:
