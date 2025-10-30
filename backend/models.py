@@ -9,11 +9,11 @@ from sqlalchemy import (
     ForeignKey,
     UniqueConstraint,
     DateTime,
+    JSON
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from datetime import datetime
-
 Base = declarative_base()
 
 # ---------------------- ABSTRACT BASE MODEL -------------------------
@@ -226,3 +226,15 @@ class EmailEvent(Base):
     sender = Column(String, nullable=True)
     subject = Column(String, nullable=True)
     timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+class VendorVPSDB(Base):
+    __tablename__ = "vendor_vps"
+
+    id = Column(Integer, primary_key=True, index=True)
+    vendor_id = Column(String, index=True, nullable=False)
+    persona = Column(String, nullable=False)
+    vps_score = Column(Float, nullable=False)
+    aggregated_risk = Column(Float, nullable=False)
+    last_updated = Column(DateTime, default=datetime.utcnow)
+    decay_weight = Column(Float, default=1.0)
+    history = Column(JSON, default=list)
