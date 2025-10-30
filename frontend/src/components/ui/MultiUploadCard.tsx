@@ -10,6 +10,8 @@ interface MultiUploadCardProps {
   total: number;
   processed: number;
   completed: boolean;
+  disabled?: boolean;
+  disabledHint?: string;
 }
 
 export const MultiUploadCard: React.FC<MultiUploadCardProps> = ({
@@ -20,6 +22,8 @@ export const MultiUploadCard: React.FC<MultiUploadCardProps> = ({
   total,
   processed,
   completed,
+  disabled = false,
+  disabledHint = "Upload the purchase order first",
 }) => {
   const onChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
@@ -32,21 +36,25 @@ export const MultiUploadCard: React.FC<MultiUploadCardProps> = ({
   return (
     <label
       className={cn(
-        "relative rounded-xl p-5 border-2 cursor-pointer min-h-[160px] flex flex-col gap-4 transition-all",
-        "ring-1 ring-transparent hover:ring-primary/10 hover:shadow-sm",
+        "group relative rounded-xl p-5 border-2 min-h-[160px] flex flex-col gap-4 transition-all",
+        disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer",
+        disabled ? "hover:ring-transparent" : "ring-1 ring-transparent hover:ring-primary/10",
         completed
           ? "border-emerald-300/60 bg-emerald-50/60"
           : showProgress
           ? "border-amber-300/60 bg-amber-50/40"
           : "border-dashed border-border bg-card hover:border-primary/40"
       )}
+      aria-disabled={disabled}
+      title={disabled ? disabledHint : undefined}
     >
       <input
         type="file"
         multiple
         accept={accept}
         onChange={onChange}
-        className="absolute inset-0 opacity-0 cursor-pointer"
+        className={cn("absolute inset-0 opacity-0", disabled ? "cursor-not-allowed" : "cursor-pointer")}
+        disabled={disabled}
       />
 
       <div className="flex items-center gap-3">
@@ -91,6 +99,12 @@ export const MultiUploadCard: React.FC<MultiUploadCardProps> = ({
       {!showProgress && !completed && (
         <div className="mt-auto flex items-center justify-center gap-2 text-sm text-muted-foreground">
           <Upload className="size-4" /> Click to upload files
+        </div>
+      )}
+
+      {disabled && (
+        <div className="pointer-events-none absolute inset-x-3 bottom-3 text-xs text-muted-foreground bg-muted/60 rounded-md px-3 py-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          {disabledHint}
         </div>
       )}
     </label>

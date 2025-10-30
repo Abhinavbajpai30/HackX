@@ -5,6 +5,8 @@ import { ParticleButton } from "@/components/ui/particle-button";
 import { Particles } from "@/components/ui/particles";
 import { useAuthValidation } from "@/hooks/use-auth-validation";
 import { AuthService } from "@/lib/auth";
+import NavBar from "@/components/layout/NavBar";
+import ChatSidebar from "@/components/layout/ChatSidebar";
 
 const BACKEND_URL = import.meta.env?.VITE_BACKEND_URL || "http://localhost:8000";
 
@@ -13,6 +15,10 @@ const Index = () => {
   useAuthValidation();
   const [invoice, setInvoice] = useState({ total: 0, processed: 0, completed: false });
   const [po, setPo] = useState({ total: 0, processed: 0, completed: false });
+  const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    return localStorage.getItem("sidebarOpen") !== "false";
+  });
 
   const [invoiceId, setInvoiceId] = useState<number | null>(null);
   const [poId, setPoId] = useState<number | null>(null);
@@ -121,12 +127,16 @@ const Index = () => {
   };
 
   return (
-    <div className="relative h-screen bg-background flex flex-col items-center justify-center overflow-hidden">
+    <div className="relative min-h-screen bg-background overflow-hidden">
       {/* Particles Background */}
       <Particles className="absolute inset-0 z-0" quantity={120} staticity={50} size={1} color="#6F00FF" />
 
+      <NavBar />
+      <ChatSidebar onToggle={setSidebarOpen} />
+
       {/* Content Container */}
-      <div className="relative z-10 flex flex-col items-center justify-center h-full w-full">
+          <div className="relative z-10 flex flex-col items-center justify-center w-full pt-20 pb-10">
+
         {/* Hero Section */}
         <section className="relative overflow-hidden text-center">
           <div className="relative container mx-auto px-6 text-center">
@@ -146,19 +156,23 @@ const Index = () => {
         <section className="container mx-auto px-6 mt-4 ">
           <div className="max-w-4xl mx-auto ">
             <div className="grid md:grid-cols-2 gap-8 mb-[48px]">
-              <MultiUploadCard
-                title="Upload Invoice"
-                onFilesSelected={(files) => handleFilesSelected(files, "invoice")}
-                total={invoice.total}
-                processed={invoice.processed}
-                completed={invoice.completed}
-              />
+              {/* First: Purchase Order */}
               <MultiUploadCard
                 title="Upload Purchase Order"
                 onFilesSelected={(files) => handleFilesSelected(files, "po")}
                 total={po.total}
                 processed={po.processed}
                 completed={po.completed}
+              />
+              {/* Second: Invoice (disabled until PO uploaded) */}
+              <MultiUploadCard
+                title="Upload Invoice"
+                onFilesSelected={(files) => handleFilesSelected(files, "invoice")}
+                total={invoice.total}
+                processed={invoice.processed}
+                completed={invoice.completed}
+                disabled={po.total === 0}
+                disabledHint="Upload the purchase order first"
               />
             </div>
 
