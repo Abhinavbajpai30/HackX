@@ -3,9 +3,12 @@ import { Link } from "react-router-dom";
 import { Particles } from "@/components/ui/particles";
 import { AIInputWithFile } from "@/components/ui/ai-input-with-file";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { ArrowLeft, Info } from "lucide-react";
+import { ArrowLeft, Download, Info } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ChatMessage } from "@/components/chat/ChatMessage";
+import { Button } from "@/components/ui/button";
+import NavBar from "@/components/layout/NavBar";
+import ChatSidebar from "@/components/layout/ChatSidebar";
 
 type Difference = {
   id: string;
@@ -98,12 +101,39 @@ export default function Report() {
   };
 
   const dot = (s: Difference["severity"]) => (s === "high" ? "bg-red-500" : "bg-amber-400");
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    return localStorage.getItem('sidebarOpen') !== 'false';
+  });
+
+  const handleDownloadCSV = () => {
+    const headers = ["Field", "Invoice", "PO", "Severity", "Note", "Recommendation"]; 
+    const rows = differences.map((d) => [
+      d.field.replace(/,/g, " "),
+      String(d.invoice).replace(/,/g, ""),
+      String(d.po).replace(/,/g, ""),
+      d.severity,
+      (d.note || "").replace(/\n|,/g, " "),
+      (d.recommendation || "").replace(/\n|,/g, " "),
+    ]);
+
+    const csv = [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `verification-report-${summary.invoiceNumber}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div className="relative min-h-screen bg-background overflow-hidden">
       <Particles className="absolute inset-0 z-0" quantity={90} staticity={60} size={1} color="#6F00FF" />
+      <NavBar />
+      <ChatSidebar onToggle={setIsSidebarOpen} />
 
-      <div className="relative z-10 container mx-auto px-6 py-10 max-w-5xl">
+      <div className={`relative z-10 container mx-auto ${isSidebarOpen ? 'pl-24' : 'px-6'} pt-20 pb-10 max-w-5xl`}>
         <Link 
           to="/" 
           className="inline-flex items-center text-sm text-muted-foreground hover:text-foreground transition-colors mb-6"
@@ -113,9 +143,15 @@ export default function Report() {
         </Link>
         {/* Header */}
         <header className="mb-6">
-          <h1 className="font-serif text-3xl md:text-4xl font-bold text-foreground leading-tight">
-            Verification Report
-          </h1>
+          <div className="flex items-center justify-between gap-3">
+            <h1 className="font-serif text-3xl md:text-4xl font-bold text-foreground leading-tight">
+              Verification Report
+            </h1>
+            <Button variant="outline" className="rounded-full" onClick={handleDownloadCSV}>
+              <Download className="h-4 w-4 mr-2" />
+              Download CSV
+            </Button>
+          </div>
           <p className="text-sm text-muted-foreground mt-1">
             Invoice {summary.invoiceNumber} vs PO {summary.poNumber}
           </p>
