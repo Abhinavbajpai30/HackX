@@ -4,6 +4,7 @@ import { InsightsSidebar } from "@/components/dashboard/InsightsSidebar";
 import { CheckCircle, AlertTriangle, Download, Network, MessageSquare } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useState } from "react";
+import { useAuthValidation } from "@/hooks/use-auth-validation";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
 import { ChatMessage } from "@/components/chat/ChatMessage";
@@ -15,6 +16,7 @@ interface Message {
 
 const Dashboard = () => {
   const navigate = useNavigate();
+  useAuthValidation();
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState<Message[]>([
     { role: "assistant", content: "Hi! I've analyzed your documents. Ask me anything about the verification results." }

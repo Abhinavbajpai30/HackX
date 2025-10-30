@@ -2,9 +2,11 @@ import { Button } from "@/components/ui/button";
 import { GradientCard } from "@/components/ui/gradient-card";
 import { ArrowLeft, TrendingUp, AlertCircle, Users } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import { useAuthValidation } from "@/hooks/use-auth-validation";
 
 const VendorGraph = () => {
   const navigate = useNavigate();
+  useAuthValidation();
 
   // Mock vendor data
   const vendors = [

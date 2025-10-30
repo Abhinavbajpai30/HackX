@@ -4,8 +4,8 @@ Requirements:
     pip install fastapi uvicorn google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client python-jose[cryptography] python-multipart motor pymongo python-dotenv
 """
 
-from fastapi import FastAPI, HTTPException, Depends, Request, Response
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI, HTTPException, Depends, Request, Response, Cookie, Header
+from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -18,14 +18,12 @@ from models import GmailUser, GmailEmail, OAuthState, GmailSenderStat, EmailEven
 import os
 import json
 from typing import Optional
-from datetime import datetime, timedelta
-import base64
-from dotenv import load_dotenv, find_dotenv
-
 from datetime import datetime, timedelta, timezone
 import base64
 from dotenv import load_dotenv, find_dotenv
 from contextlib import asynccontextmanager
+import jwt
+import secrets
 
 load_dotenv(find_dotenv())
 
@@ -38,7 +36,13 @@ app = FastAPI()
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "your-client-id.apps.googleusercontent.com")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "your-client-secret")
 REDIRECT_URI = os.getenv("REDIRECT_URI", "http://localhost:8000/auth/callback")
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+# JWT Configuration
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", secrets.token_urlsafe(32))
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = 24 * 7  # 7 days
 
 # CORS Configuration
 ALLOWED_ORIGINS = os.getenv(
@@ -103,6 +107,63 @@ def dict_to_credentials(creds_dict):
         client_secret=creds_dict['client_secret'],
         scopes=creds_dict['scopes']
     )
+
+
+def create_access_token(user_email: str, user_data: dict) -> str:
+    """Create JWT access token for authenticated user"""
+    payload = {
+        "email": user_email,
+        "user_data": user_data,
+        "exp": datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS),
+        "iat": datetime.utcnow(),
+    }
+    return jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def verify_token(token: str) -> dict:
+    """Verify JWT token and return payload"""
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        return payload
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+async def get_current_user(authorization: Optional[str] = Header(None), session: AsyncSession = Depends(get_async_session)) -> dict:
+    """Dependency to get current authenticated user from JWT token"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header missing")
+    
+    try:
+        scheme, token = authorization.split()
+        if scheme.lower() != "bearer":
+            raise HTTPException(status_code=401, detail="Invalid authentication scheme")
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid authorization header format")
+    
+    payload = verify_token(token)
+    user_email = payload.get("email")
+    
+    if not user_email:
+        raise HTTPException(status_code=401, detail="Invalid token payload")
+    
+    # Verify user exists in database
+    res_user = await session.execute(select(GmailUser).where(GmailUser.email == user_email))
+    user = res_user.scalar_one_or_none()
+    
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    
+    if user.logged_out_at and user.logged_out_at > payload.get("iat", datetime.min):
+        raise HTTPException(status_code=401, detail="Token invalidated by logout")
+    
+    return {
+        "email": user.email,
+        "user_info": user.user_info,
+        "last_login": user.last_login,
+    }
 
 
 @app.get("/")
@@ -176,18 +237,25 @@ async def auth_callback(code: str, state: str, session: AsyncSession = Depends(g
                 user_info=user_info,
                 credentials=credentials_to_dict(credentials),
                 last_login=datetime.utcnow(),
+                logged_out_at=None,
             )
             session.add(user_row)
         else:
             user_row.user_info = user_info
             user_row.credentials = credentials_to_dict(credentials)
             user_row.last_login = datetime.utcnow()
+            user_row.logged_out_at = None
         await session.commit()
         
         # Set up Gmail watch for this user
         await setup_gmail_watch(user_email, session)
         
-        return RedirectResponse(url=f"{FRONTEND_URL}/dashboard?email={user_email}")
+        # Create JWT token
+        access_token = create_access_token(user_email, user_info)
+        
+        # Redirect to frontend with token
+        redirect_url = f"{FRONTEND_URL}/dashboard?token={access_token}"
+        return RedirectResponse(url=redirect_url)
         
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Authentication failed: {str(e)}")
@@ -409,7 +477,7 @@ async def fetch_and_store_email(service, email_address: str, message_id: str, se
                 # Generate download URL using filename (URL-encoded)
                 from urllib.parse import quote
                 encoded_filename = quote(att['filename'])
-                download_url = f"http://localhost:8000/user/emails/{message_id}/attachments/{encoded_filename}"
+                download_url = f"{BASE_URL}/user/emails/{message_id}/attachments/{encoded_filename}"
                 print(f"     🔗 Download: {download_url}")
         
     except HttpError as error:
@@ -962,9 +1030,34 @@ async def search_emails(email: str, query: str, limit: int = 20, session: AsyncS
     return {"emails": emails, "query": query}
 
 
+@app.get("/auth/me")
+async def get_current_user_info(current_user: dict = Depends(get_current_user), session: AsyncSession = Depends(get_async_session)):
+    """Get current authenticated user's information"""
+    user_email = current_user["email"]
+    
+    res_user = await session.execute(select(GmailUser).where(GmailUser.email == user_email))
+    user = res_user.scalar_one_or_none()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    email_count = len((await session.execute(select(GmailEmail).where(GmailEmail.user_email == user_email))).scalars().all())
+    
+    return {
+        "authenticated": True,
+        "email": user.email,
+        "user_info": user.user_info,
+        "last_login": user.last_login.isoformat() if user.last_login else None,
+        "watch_active": user.watch_expiration is not None,
+        "watch_expires": user.watch_expiration.isoformat() if user.watch_expiration else None,
+        "last_sync": user.last_sync.isoformat() if user.last_sync else None,
+        "email_count": email_count,
+    }
+
+
 @app.get("/user/status")
 async def get_user_status(email: str, session: AsyncSession = Depends(get_async_session)):
-    """Check user's authentication and watch status"""
+    """Check user's authentication and watch status (legacy endpoint - use /auth/me instead)"""
     
     res_user = await session.execute(select(GmailUser).where(GmailUser.email == email))
     user = res_user.scalar_one_or_none()
@@ -1047,9 +1140,25 @@ async def get_email_analytics(email: str, session: AsyncSession = Depends(get_as
     }
 
 
+@app.post("/auth/logout")
+async def logout(current_user: dict = Depends(get_current_user), session: AsyncSession = Depends(get_async_session)):
+    """Logout current authenticated user"""
+    user_email = current_user["email"]
+    
+    res_user = await session.execute(select(GmailUser).where(GmailUser.email == user_email))
+    user = res_user.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user.logged_out_at = datetime.utcnow()
+    await session.commit()
+    
+    return {"status": "success", "message": "User logged out successfully"}
+
+
 @app.delete("/user/logout")
-async def logout(email: str, session: AsyncSession = Depends(get_async_session)):
-    """Logout user and optionally remove their data"""
+async def logout_legacy(email: str, session: AsyncSession = Depends(get_async_session)):
+    """Logout user (legacy endpoint - use POST /auth/logout instead)"""
     
     res_user = await session.execute(select(GmailUser).where(GmailUser.email == email))
     user = res_user.scalar_one_or_none()

@@ -3,14 +3,16 @@ import { useNavigate } from "react-router-dom";
 import { MultiUploadCard } from "@/components/ui/MultiUploadCard";
 import { ParticleButton } from "@/components/ui/particle-button";
 import { Particles } from "@/components/ui/particles";
+import { useAuthValidation } from "@/hooks/use-auth-validation";
+import { AuthService } from "@/lib/auth";
 import NavBar from "@/components/layout/NavBar";
 import ChatSidebar from "@/components/layout/ChatSidebar";
-import { cn } from "@/lib/utils";
 
 const BACKEND_URL = import.meta.env?.VITE_BACKEND_URL || "http://localhost:8000";
 
 const Index = () => {
   const navigate = useNavigate();
+  useAuthValidation();
   const [invoice, setInvoice] = useState({ total: 0, processed: 0, completed: false });
   const [po, setPo] = useState({ total: 0, processed: 0, completed: false });
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
@@ -42,9 +44,15 @@ const Index = () => {
     const image_mime_type = file.type || "image/png";
     const image_data = await fileToBase64(file);
 
+    const headers: HeadersInit = { "Content-Type": "application/json" };
+    const token = AuthService.getToken();
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
     const res = await fetch(`${BACKEND_URL}/extract-data`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ image_data, image_mime_type }),
     });
 
@@ -96,9 +104,15 @@ const Index = () => {
     if (!readyToCompare || invoiceId === null || poId === null) return;
     try {
       setIsComparing(true);
+      const headers: HeadersInit = { "Content-Type": "application/json" };
+      const token = AuthService.getToken();
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+
       const res = await fetch(`${BACKEND_URL}/compare-data`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ po_id: poId, invoice_id: invoiceId }),
       });
       if (!res.ok) throw new Error(`Compare failed: ${res.status}`);
@@ -125,13 +139,8 @@ const Index = () => {
 
         {/* Hero Section */}
         <section className="relative overflow-hidden text-center">
-<<<<<<< HEAD
-          <div className="relative container mx-auto px-6 mt-24 text-center">
-            <h1 className="font-serif text-6xl md:text-7xl font-bold text-foreground mb-3 leading-relaxed mb-6">
-=======
           <div className="relative container mx-auto px-6 text-center">
             <h1 className="font-serif text-6xl md:text-7xl font-bold text-foreground mb-6 leading-relaxed mb-6">
->>>>>>> 8dd5cabbc5e74820416e42017774c1254db3c4d1
               Vaanika Instant
               <br />
                 Invoice Verification
