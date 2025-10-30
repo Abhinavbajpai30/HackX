@@ -1,0 +1,126 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 0%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 0%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 0%;
+
+    --primary: 266 100% 50%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 270 60% 70%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 260 20% 96%;
+    --muted-foreground: 255 15% 40%;
+
+    --accent: 266 100% 97%;
+    --accent-foreground: 266 60% 30%;
+
+    --destructive: 0 75% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 145 65% 55%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 40 90% 60%;
+    --warning-foreground: 0 0% 0%;
+
+    --border: 0 0% 90%;
+    --input: 0 0% 92%;
+    --ring: 266 100% 50%;
+
+    --radius: 1rem;
+    
+    --gradient-peach: linear-gradient(135deg, hsl(266, 100%, 60%), hsl(266, 100%, 50%));
+    --gradient-purple: linear-gradient(135deg, hsl(266, 100%, 65%), hsl(286, 100%, 60%));
+    --gradient-sky: linear-gradient(135deg, hsl(256, 100%, 70%), hsl(276, 100%, 65%));
+    --gradient-hero: linear-gradient(135deg, hsl(266, 100%, 60%) 0%, hsl(266, 100%, 50%) 50%, hsl(286, 100%, 60%) 100%);
+    --gradient-mesh: radial-gradient(at 0% 0%, hsl(266, 100%, 85%) 0px, transparent 50%),
+                     radial-gradient(at 100% 0%, hsl(276, 100%, 85%) 0px, transparent 50%),
+                     radial-gradient(at 100% 100%, hsl(286, 100%, 85%) 0px, transparent 50%);
+    
+    --shadow-soft: 0 4px 24px -4px hsl(266 100% 50% / 0.15);
+    --shadow-medium: 0 8px 32px -4px hsl(266 100% 50% / 0.2);
+    --shadow-strong: 0 16px 48px -8px hsl(266 100% 50% / 0.25);
+    
+    --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    --transition-bounce: all 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+
+    --sidebar-background: 0 0% 98%;
+
+    --sidebar-foreground: 0 0% 0%;
+
+    --sidebar-primary: 266 100% 50%;
+
+    --sidebar-primary-foreground: 0 0% 100%;
+
+    --sidebar-accent: 266 100% 50%;
+
+    --sidebar-accent-foreground: 0 0% 100%;
+
+    --sidebar-border: 0 0% 90%;
+
+    --sidebar-ring: 266 100% 60%;
+  }
+
+  .dark {
+    --background: 0 0% 10%;
+    --foreground: 0 0% 100%;
+
+    --card: 0 0% 15%;
+    --card-foreground: 0 0% 100%;
+
+    --popover: 0 0% 15%;
+    --popover-foreground: 0 0% 100%;
+
+    --primary: 266 100% 50%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 270 60% 70%;
+    --secondary-foreground: 0 0% 100%;
+
+    --muted: 0 0% 20%;
+    --muted-foreground: 0 0% 80%;
+
+    --accent: 266 100% 50%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 75% 60%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 0 0% 20%;
+    --input: 0 0% 20%;
+    --ring: 266 100% 60%;
+    --sidebar-background: 0 0% 10%;
+    --sidebar-foreground: 0 0% 100%;
+    --sidebar-primary: 266 100% 50%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 266 100% 50%;
+    --sidebar-accent-foreground: 0 0% 100%;
+    --sidebar-border: 0 0% 20%;
+    --sidebar-ring: 266 100% 60%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
