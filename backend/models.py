@@ -128,11 +128,11 @@ class CompareResponseDB(Base):
     id = Column(Integer, primary_key=True, index=True)
     discrepancy = Column(JSONB, nullable=False, default=list)  # stores list[dict]
     summary = Column(Text, nullable=False)
-
+    vendor_id = Column(String, index=True, nullable=True)
+    discrepancy_vector = Column(JSONB, nullable=False, default=list)
     invoice_id = Column(Integer, ForeignKey("invoices.id"), nullable=True)
     po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
     created_by = Column(Integer, ForeignKey("gmail_users.id"), nullable=True)
-
 
 # --------------------------- GMAIL INTEGRATION TABLES -----------------------
 class GmailUser(Base):
@@ -238,3 +238,14 @@ class VendorVPSDB(Base):
     last_updated = Column(DateTime, default=datetime.utcnow)
     decay_weight = Column(Float, default=1.0)
     history = Column(JSON, default=list)
+
+
+# --------------------------- REPORTS TABLE ---------------------------
+class ReportDB(Base):
+    __tablename__ = "reports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    # Stores chat history as list[{role: str, content: str}]
+    messages = Column(JSONB, nullable=False, default=list)
+    created_by = Column(Integer, ForeignKey("gmail_users.id"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

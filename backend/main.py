@@ -29,8 +29,7 @@ app.include_router(mail_app.router)
 @app.on_event("startup")
 async def on_startup():
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
+        await conn.run_sync(Base.metadata.create_all, checkfirst=True)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))

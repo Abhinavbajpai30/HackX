@@ -1,23 +1,39 @@
 import math
-from datetime import datetime, timedelta
+from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from models import CompareResponseDB, DocumentDataDB, Base
 from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON
 from sqlalchemy.orm import relationship
+from models import Base
 
 # ---------------------- CONFIG ----------------------
-LAMBDA_DECAY = 0.05   # Time decay rate
-KAPPA_SENSITIVITY = 0.1  # Score sensitivity
-DEFAULT_PERSONA = "margin"  # default persona if none specified
+LAMBDA_DECAY = 0.05          # Time decay rate
+KAPPA_SENSITIVITY = 0.1      # Score sensitivity
+DEFAULT_PERSONA = "margin"    # default persona if none specified
+MAX_FIELDS = 82               # expected vector length
 
 # Example persona-based severity weightings for 82 fields
-# (In production, load from DB or config)
 PERSONA_SEVERITY_WEIGHTS = {
-    "compliance": [2.0 if i in range(10, 20) else 1.0 for i in range(82)],
-    "margin": [2.0 if i in range(0, 10) else 1.0 for i in range(82)],
-    "operations": [2.0 if i in range(20, 30) else 1.0 for i in range(82)],
+    "compliance": [2.0 if i in range(10, 20) else 1.0 for i in range(MAX_FIELDS)],
+    "margin": [2.0 if i in range(0, 10) else 1.0 for i in range(MAX_FIELDS)],
+    "operations": [2.0 if i in range(20, 30) else 1.0 for i in range(MAX_FIELDS)],
 }
+
+# ---------------------- MODEL ----------------------
+class VendorVPSDB(Base):
+    __tablename__ = "vendor_vps"
+
+    __table_args__ = {"extend_existing": True}  # ✅ fix duplicate definition
+
+    id = Column(Integer, primary_key=True, index=True)
+    vendor_id = Column(String, index=True, nullable=False)
+    persona = Column(String, nullable=False)
+    vps_score = Column(Float, nullable=False)
+    aggregated_risk = Column(Float, nullable=False)
+    last_updated = Column(DateTime, nullable=False)
+    decay_weight = Column(Float, nullable=True)
+    history = Column(JSON, default=list)
+
 
 # ---------------------- VPS CALCULATION ----------------------
 async def calculate_vps(
@@ -29,34 +45,33 @@ async def calculate_vps(
 ) -> float:
     """
     Calculates Vendor Persona Score (VPS) for a vendor given discrepancy vector (0/1 values).
-
-    Args:
-        session: Async SQLAlchemy session.
-        vendor_id: Vendor identifier.
-        persona: Persona type ('compliance', 'margin', 'operations', etc.)
-        discrepancy_vector: List of 82 integers (0 or 1).
-        timestamp: Optional; defaults to current UTC time.
-
-    Returns:
-        Computed VPS score (float between 0 and 100).
+    Handles cases where discrepancy_vector != 82.
     """
     timestamp = timestamp or datetime.utcnow()
     weights = PERSONA_SEVERITY_WEIGHTS.get(persona, PERSONA_SEVERITY_WEIGHTS[DEFAULT_PERSONA])
 
+    # Ensure discrepancy vector length = MAX_FIELDS
+    n = len(discrepancy_vector)
+    if n < MAX_FIELDS:
+        discrepancy_vector = discrepancy_vector + [0] * (MAX_FIELDS - n)
+    elif n > MAX_FIELDS:
+        discrepancy_vector = discrepancy_vector[:MAX_FIELDS]
+
+    # Align weights length
+    weights = weights[:len(discrepancy_vector)]
+
     # Step 1: Compute Φ(v, T)
-    # Since we only have a single snapshot of discrepancies (0 or 1),
-    # we assume these represent occurrences at time T
     phi_vector = [val * math.exp(-LAMBDA_DECAY * 0) for val in discrepancy_vector]
 
-    # Step 2: Compute R(v, T, p)
+    # Step 2: Compute aggregated risk
     aggregated_risk = sum(w * phi for w, phi in zip(weights, phi_vector))
 
-    # Step 3: Normalize to VPS
+    # Step 3: Normalize to VPS (exponential decay of risk)
     vps_score = 100 * math.exp(-KAPPA_SENSITIVITY * aggregated_risk)
+    vps_score = round(vps_score, 2)
 
     # Step 4: Store / update in DB
     await update_vendor_vps(session, vendor_id, persona, vps_score, aggregated_risk, timestamp)
-
     return vps_score
 
 
@@ -86,7 +101,7 @@ async def update_vendor_vps(
         decay_factor = math.exp(-LAMBDA_DECAY * delta_days)
 
         decayed_score = existing.vps_score * decay_factor
-        updated_vps = (decayed_score + new_vps) / 2  # simple moving average with decay
+        updated_vps = (decayed_score + new_vps) / 2  # weighted moving avg
         updated_risk = (existing.aggregated_risk * decay_factor + new_risk) / 2
 
         existing.vps_score = round(updated_vps, 2)
@@ -119,12 +134,12 @@ async def compute_vps_from_compare_data(session: AsyncSession, compare_data: dic
     Computes and stores VPS given a /compare-data response.
     Expects compare_data to contain:
       - vendor_id (str)
-      - discrepancies (list of 82 binary values)
+      - discrepancies (list[int]) — can be shorter/longer than 82
     """
     vendor_id = compare_data.get("vendor_id")
     discrepancy_vector = compare_data.get("discrepancies")
 
-    if not vendor_id or not discrepancy_vector or len(discrepancy_vector) != 82:
-        raise ValueError("Invalid compare-data input: must include vendor_id and 82-length discrepancy vector.")
+    if not vendor_id or not discrepancy_vector or not isinstance(discrepancy_vector, list):
+        raise ValueError("Invalid compare-data input: must include vendor_id and discrepancy vector list.")
 
     return await calculate_vps(session, vendor_id, persona, discrepancy_vector)
