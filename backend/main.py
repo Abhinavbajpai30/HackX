@@ -3,15 +3,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from db import engine
 from models import Base
-from auth import (
-    fastapi_users,
-    UserCreate,
-    UserRead,
-    UserUpdate,
-    auth_backend,
-    google_oauth_client,
-)
 from routes import router as api_router
+from mail import app as mail_app
 import os
 
 app = FastAPI(
@@ -28,34 +21,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- FastAPI Users Routers ---
-app.include_router(
-    fastapi_users.get_oauth_router(
-        google_oauth_client,
-        auth_backend,
-        state_secret="SUPER_SECRET_OAUTH_STATE",
-    ),
-    prefix="/auth/google",
-    tags=["auth"],
-)
-app.include_router(
-    fastapi_users.get_auth_router(auth_backend),
-    prefix="/auth/jwt",
-    tags=["auth"],
-)
-app.include_router(
-    fastapi_users.get_register_router(UserRead, UserCreate),
-    prefix="/auth/signup",
-    tags=["auth"],
-)
-app.include_router(
-    fastapi_users.get_users_router(UserRead, UserUpdate),
-    prefix="/users",
-    tags=["users"],
-)
-
 # --- Main API Endpoints ---
 app.include_router(api_router)
+app.include_router(mail_app.router)
 
 # --- Database Initialization ---
 @app.on_event("startup")

@@ -8,10 +8,12 @@ from sqlalchemy import (
     Text,
     ForeignKey,
     UniqueConstraint,
+    DateTime,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from fastapi_users.db import SQLAlchemyBaseUserTable
+from datetime import datetime
 
 Base = declarative_base()
 
@@ -122,3 +124,82 @@ class CompareResponseDB(Base):
     invoice_id = Column(Integer, ForeignKey("invoices.id"), nullable=True)
     po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True)
     created_by = Column(Integer, ForeignKey("user.id"), nullable=True)
+
+
+# --------------------------- GMAIL INTEGRATION TABLES -----------------------
+class GmailUser(Base):
+    __tablename__ = "gmail_users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    user_info = Column(JSONB, nullable=True)
+    credentials = Column(JSONB, nullable=True)
+    watch_expiration = Column(DateTime, nullable=True)
+    history_id = Column(String, nullable=True)
+    last_login = Column(DateTime, nullable=True)
+    last_sync = Column(DateTime(timezone=True), nullable=True)
+    logged_out_at = Column(DateTime, nullable=True)
+
+
+class GmailEmail(Base):
+    __tablename__ = "gmail_emails"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_email = Column(String, index=True, nullable=False)
+    message_id = Column(String, unique=True, index=True, nullable=False)
+    thread_id = Column(String, nullable=True)
+    from_addr = Column(String, nullable=True)
+    to_addr = Column(String, nullable=True)
+    subject = Column(String, nullable=True)
+    date = Column(String, nullable=True)
+    snippet = Column(Text, nullable=True)
+    labels = Column(JSONB, nullable=False, default=list)
+    internal_date = Column(String, index=True, nullable=True)
+    received_at = Column(DateTime, default=datetime.utcnow)
+
+    body_plain = Column(Text, nullable=True)
+    body_html = Column(Text, nullable=True)
+    body_snippet = Column(Text, nullable=True)
+
+    has_attachments = Column(Boolean, default=False)
+    attachments = Column(JSONB, nullable=False, default=list)
+
+    priority = Column(String, nullable=True)
+    is_important = Column(Boolean, default=False)
+    category = Column(String, nullable=True)
+    sender_domain = Column(String, index=True, nullable=True)
+
+
+class GmailSenderStat(Base):
+    __tablename__ = "gmail_sender_stats"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_email = Column(String, index=True, nullable=False)
+    domain = Column(String, index=True, nullable=False)
+    email_count = Column(Integer, default=0)
+    last_email_date = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("user_email", "domain", name="uq_user_domain"),
+    )
+
+
+class OAuthState(Base):
+    __tablename__ = "oauth_states"
+
+    id = Column(Integer, primary_key=True, index=True)
+    state = Column(String, unique=True, index=True, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+
+
+class EmailEvent(Base):
+    __tablename__ = "email_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_email = Column(String, index=True, nullable=False)
+    event_type = Column(String, nullable=False)
+    message_id = Column(String, index=True, nullable=True)
+    sender = Column(String, nullable=True)
+    subject = Column(String, nullable=True)
+    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)

@@ -3,7 +3,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from db import get_async_session
 from models import InvoiceDB, PurchaseOrderDB, CompareResponseDB
-from auth import fastapi_users, UserRead
 from typing import List, Optional, Dict, Any
 from gemini_utils import (
     call_gemini_api,
