@@ -220,7 +220,8 @@ export default function Report() {
                 <ChatMessage role={m.role} content={m.content} />
               </div>
             ))}
-            <div ref={listRef} />
+            {/* Anchor + spacer to ensure we can scroll past the fixed input */}
+            <div ref={listRef} className="h-20" aria-hidden />
           </div>
         </section>
       </div>

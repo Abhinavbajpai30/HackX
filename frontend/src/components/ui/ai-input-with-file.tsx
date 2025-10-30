@@ -43,7 +43,7 @@ export function AIInputWithFile({ onSubmit, placeholder = "Let'sChat!", classNam
             }
           }}
           placeholder={placeholder}
-          className="flex-1 h-[100%] rounded-full  text-sm outline-none "
+          className="flex-1 h-[100%] rounded-full pl-2  text-sm outline-none "
         />
         <Button onClick={submit} className="h-11 rounded-full px-5">
           <SendHorizonal className="h-4 w-4" />
