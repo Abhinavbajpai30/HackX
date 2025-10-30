@@ -23,18 +23,16 @@ export function AIInputWithFile({ onSubmit, placeholder = "Let'sChat!", classNam
   };
 
   return (
-    <div className="bg-card w-[600px] h-[64px]">
+    <div className="bg-card rounded-full w-[600px] h-[64px]">
       {file && (
-        <div className="mb-2 inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs bg-transparent">
+        <div className="mb-2  inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ">
    
-          <span className="max-w-[200px] truncate">{file.name}</span>
+          <span className="max-w-[240px] h-[200px] rounded-full truncate">{file.name}</span>
           <button onClick={() => setFile(undefined)} className="text-muted-foreground hover:text-foreground">
           </button>
         </div>
       )}
-      <div className="flex items-center gap-2">
-    
-        <input ref={fileInputRef} type="file" className="hidden" onChange={(e) => setFile(e.target.files?.[0])} />
+      <div className="flex items-center gap-2 bg-white rounded-full px-6 py-2 border">
         <input
           value={value}
           onChange={(e) => setValue(e.target.value)}
@@ -45,7 +43,7 @@ export function AIInputWithFile({ onSubmit, placeholder = "Let'sChat!", classNam
             }
           }}
           placeholder={placeholder}
-          className="flex-1 h-11 rounded-full border bg-transparent px-4 text-sm outline-none focus:ring-2 focus:ring-primary/30"
+          className="flex-1 h-[100%] rounded-full  text-sm outline-none "
         />
         <Button onClick={submit} className="h-11 rounded-full px-5">
           <SendHorizonal className="h-4 w-4" />

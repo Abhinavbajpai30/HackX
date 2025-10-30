@@ -73,14 +73,20 @@ export default function ChatSidebar({ className = "", onToggle }: { className?: 
         </div>
       </div>
 
-      {/* Re-open handle: minimal right arrow, no shadow */}
+      {/* Re-open handle */}
       {!open && (
         <button
           onClick={() => setOpen(true)}
-          className="fixed top-14 left-0 z-40 h-8 w-6 flex items-center justify-center bg-white border-r border-t"
+          className={cn(
+            "fixed top-14 left-0 z-40 h-10 w-10 flex items-center justify-center",
+            "bg-white/80 hover:bg-white transition-all duration-200 ease-in-out",
+            "border-r border-b border-t border-border/50 hover:border-border",
+            "shadow-sm hover:border-[#333] backdrop-blur-sm",
+            "group"
+          )}
           aria-label="Open sidebar"
         >
-          <ChevronRight className="h-4 w-4" />
+          <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-foreground transition-colors" />
         </button>
       )}
     </aside>
