@@ -114,7 +114,7 @@ export default function Report() {
           "ngrok-skip-browser-warning": "true",
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ role: "user", content: message }),
       });
       
       if (!response.ok) {
