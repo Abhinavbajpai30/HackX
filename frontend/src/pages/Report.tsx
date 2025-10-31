@@ -1,75 +1,32 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 import { Particles } from "@/components/ui/particles";
 import { AIInputWithFile } from "@/components/ui/ai-input-with-file";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { ArrowLeft, Download, Info } from "lucide-react";
+import { ArrowLeft, Download } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ChatMessage } from "@/components/chat/ChatMessage";
 import { Button } from "@/components/ui/button";
 import NavBar from "@/components/layout/NavBar";
 import ChatSidebar from "@/components/layout/ChatSidebar";
 
-type Difference = {
-  id: string;
-  field: string;
-  invoice: string | number | null;
-  po: string | number | null;
-  severity: "low" | "medium" | "high";
-  note: string;
-  recommendation?: string;
+type Discrepancy = {
+  name: string;
+  details: string;
+};
+
+type CompareResponse = {
+  vendor_id?: string | null;
+  discrepancy: Discrepancy[];
+  summary: string;
 };
 
 export default function Report() {
-  // Dummy, replace with backend payload later
-  const summary = useMemo(
-    () => ({
-      vendor: "Acme Supplies Pvt Ltd",
-      invoiceNumber: "INV-2025-0142",
-      poNumber: "PO-22915",
-      invoiceDate: "2025-10-02",
-      dueDate: "2025-11-01",
-      currency: "INR",
-      total: 128450.0,
-      items: 7,
-      taxes: "GST 18%",
-      status: "Pending Review",
-    }),
-    [],
-  );
-
-  const differences: Difference[] = useMemo(
-    () => [
-      {
-        id: "qty-line-3",
-        field: "Quantity (Line 3)",
-        invoice: 120,
-        po: 100,
-        severity: "high",
-        note: "Invoice shows 20 more units than PO.",
-        recommendation: "Verify delivery challan and adjust bill or raise a debit note.",
-      },
-      {
-        id: "rate-item-5",
-        field: "Rate (Item 5)",
-        invoice: "₹1,250.00",
-        po: "₹1,200.00",
-        severity: "medium",
-        note: "Rate increased by 4.2% vs. PO.",
-        recommendation: "Confirm revised quote or apply PO rate.",
-      },
-      {
-        id: "gst-mismatch",
-        field: "GST Split",
-        invoice: "18% IGST",
-        po: "9% CGST + 9% SGST",
-        severity: "low",
-        note: "Tax structure differs; total tax equal.",
-        recommendation: "Confirm place-of-supply and company GST registrations.",
-      },
-    ],
-    [],
-  );
+  const location = useLocation();
+  const state = location.state as { report?: CompareResponse } | null;
+  const report: CompareResponse | undefined = state?.report;
+  const discrepancies: Discrepancy[] = report?.discrepancy ?? [];
+  const vendorId: string | null = report?.vendor_id ?? null;
+  const summaryText: string = report?.summary ?? "No summary available.";
 
   // Chat state
   const [messages, setMessages] = useState<{ role: "assistant" | "user"; content: string }[]>([
@@ -95,26 +52,23 @@ export default function Report() {
     // Simple mock assistant reply
     const reply =
       text.toLowerCase().includes("summary")
-        ? `Summary: Vendor ${summary.vendor}, Invoice ${summary.invoiceNumber} vs PO ${summary.poNumber}. Total ₹${summary.total.toLocaleString()} ${summary.currency}. ${differences.length} potential issues.`
-        : `Top flagged item: ${differences[0].field} — ${differences[0].note}`;
+        ? `Summary: ${summaryText}`
+        : discrepancies.length > 0
+          ? `Top flagged item: ${discrepancies[0].name} — ${discrepancies[0].details}`
+          : "No discrepancies found.";
     setTimeout(() => setMessages((m) => [...m, { role: "assistant", content: reply }]), 400);
   };
 
-  const dot = (s: Difference["severity"]) => (s === "high" ? "bg-red-500" : "bg-amber-400");
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(() => {
     if (typeof window === 'undefined') return true;
     return localStorage.getItem('sidebarOpen') !== 'false';
   });
 
   const handleDownloadCSV = () => {
-    const headers = ["Field", "Invoice", "PO", "Severity", "Note", "Recommendation"]; 
-    const rows = differences.map((d) => [
-      d.field.replace(/,/g, " "),
-      String(d.invoice).replace(/,/g, ""),
-      String(d.po).replace(/,/g, ""),
-      d.severity,
-      (d.note || "").replace(/\n|,/g, " "),
-      (d.recommendation || "").replace(/\n|,/g, " "),
+    const headers = ["Name", "Details"];
+    const rows = discrepancies.map((d) => [
+      d.name.replace(/,/g, " "),
+      (d.details || "").replace(/\n|,/g, " "),
     ]);
 
     const csv = [headers.join(","), ...rows.map((r) => r.join(","))].join("\n");
@@ -122,7 +76,7 @@ export default function Report() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `verification-report-${summary.invoiceNumber}.csv`;
+    a.download = `verification-report-${vendorId || "report"}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -152,53 +106,30 @@ export default function Report() {
               Download CSV
             </Button>
           </div>
-          <p className="text-sm text-muted-foreground mt-1">
-            Invoice {summary.invoiceNumber} vs PO {summary.poNumber}
-          </p>
+          {vendorId && (
+            <p className="text-sm text-muted-foreground mt-1">Vendor: {vendorId}</p>
+          )}
         </header>
 
         {/* Summary - plain text */}
         <section className="rounded-xl border bg-card p-5 md:p-6 mb-6">
-          <p className="text-sm text-foreground leading-relaxed">
-            Vendor <span className="font-medium">{summary.vendor}</span> — Invoice <span className="font-medium">{summary.invoiceNumber}</span> vs PO <span className="font-medium">{summary.poNumber}</span>. Issued on <span className="font-medium">{summary.invoiceDate}</span>, due by <span className="font-medium">{summary.dueDate}</span>. Total <span className="font-medium">₹{summary.total.toLocaleString()} {summary.currency}</span> for <span className="font-medium">{summary.items}</span> items, taxes: <span className="font-medium">{summary.taxes}</span>. Status: <span className="font-medium">{summary.status}</span>.
-          </p>
+          <p className="text-sm text-foreground leading-relaxed">{summaryText}</p>
         </section>
 
         {/* Differences */}
         <section className="mb-28">
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-lg font-semibold text-foreground">Differences & Flags</h2>
-            <span className="text-xs text-muted-foreground">{differences.length} findings</span>
+            <span className="text-xs text-muted-foreground">{discrepancies.length} findings</span>
           </div>
           <div className="grid md:grid-cols-2 gap-4">
-            {differences.map((d) => (
-              <article key={d.id} className="rounded-xl border bg-card p-4">
+            {discrepancies.map((d, idx) => (
+              <article key={idx} className="rounded-xl border bg-card p-4">
                 <div className="flex items-center gap-2 mb-2">
-                  <span className={cn("inline-block h-2.5 w-2.5 rounded-full shrink-0", dot(d.severity))} />
-                  <div className="font-medium text-foreground">{d.field.replace(/\s*\(.*\)/, "")}</div>
-                  {d.recommendation && (
-                    <TooltipProvider>
-                      <Tooltip>
-                        <TooltipTrigger className="ml-auto inline-flex items-center text-muted-foreground hover:text-foreground">
-                          <Info className="h-4 w-4" />
-                        </TooltipTrigger>
-                        <TooltipContent sideOffset={6} className="max-w-xs text-xs leading-relaxed">
-                          {d.recommendation}
-                        </TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
-                  )}
+                  <span className={cn("inline-block h-2.5 w-2.5 rounded-full shrink-0", "bg-emerald-500")} />
+                  <div className="font-medium text-foreground">{d.name}</div>
                 </div>
-                <dl className="grid grid-cols-2 gap-3 text-sm">
-                  <div>
-                    <dt className="text-muted-foreground">Invoice</dt>
-                    <dd className="font-medium break-words">{String(d.invoice)}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-muted-foreground">PO</dt>
-                    <dd className="font-medium break-words">{String(d.po)}</dd>
-                  </div>
-                </dl>
+                <p className="text-sm text-muted-foreground">{d.details}</p>
               </article>
             ))}
           </div>
