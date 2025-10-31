@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
 import { Particles } from "@/components/ui/particles";
 import { AIInputWithFile } from "@/components/ui/ai-input-with-file";
 import { ArrowLeft, Download } from "lucide-react";
@@ -15,48 +15,118 @@ type Discrepancy = {
 };
 
 type CompareResponse = {
+  id?: number;
   vendor_id?: string | null;
   discrepancy: Discrepancy[];
   summary: string;
+  messages?: { role: "assistant" | "user"; content: string }[];
 };
 
 export default function Report() {
+  const { id } = useParams<{ id: string }>();
   const location = useLocation();
   const state = location.state as { report?: CompareResponse } | null;
-  const report: CompareResponse | undefined = state?.report;
+  
+  const [report, setReport] = useState<CompareResponse | undefined>(state?.report);
+  const [loading, setLoading] = useState(!state?.report);
+  
+  const reportId: number | undefined = report?.id || (id ? parseInt(id) : undefined);
   const discrepancies: Discrepancy[] = report?.discrepancy ?? [];
   const vendorId: string | null = report?.vendor_id ?? null;
   const summaryText: string = report?.summary ?? "No summary available.";
 
   // Chat state
-  const [messages, setMessages] = useState<{ role: "assistant" | "user"; content: string }[]>([
-    {
-      role: "assistant",
-      content:
-        "Hi! I generated a quick summary and highlighted differences. Ask me anything about this verification.",
-    },
-  ]);
+  const [messages, setMessages] = useState<{ role: "assistant" | "user"; content: string }[]>([]);
   const [input, setInput] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
+
+  // Load report data from API if not passed via state
+  useEffect(() => {
+    const loadReport = async () => {
+      if (!reportId || report) return;
+      
+      try {
+        setLoading(true);
+        const response = await fetch(`${import.meta.env?.VITE_BACKEND_URL}/reports/${reportId}`, {
+          headers: {
+            "ngrok-skip-browser-warning": "true",
+          },
+        });
+        
+        if (!response.ok) {
+          throw new Error("Failed to load report");
+        }
+        
+        const data = await response.json();
+        setReport(data);
+        
+        // Load messages from the response
+        if (data.messages && Array.isArray(data.messages)) {
+          setMessages(data.messages);
+        } else {
+          // Fallback to default welcome message
+          setMessages([{
+            role: "assistant",
+            content: "Hi! I generated a quick summary and highlighted differences. Ask me anything about this verification.",
+          }]);
+        }
+      } catch (error) {
+        console.error("Error loading report:", error);
+        // Set default message on error
+        setMessages([{
+          role: "assistant",
+          content: "Hi! I generated a quick summary and highlighted differences. Ask me anything about this verification.",
+        }]);
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    loadReport();
+  }, [reportId]);
+
+  // Initialize messages from report if passed via state
+  useEffect(() => {
+    if (report?.messages && Array.isArray(report.messages) && messages.length === 0) {
+      setMessages(report.messages);
+    } else if (messages.length === 0) {
+      setMessages([{
+        role: "assistant",
+        content: "Hi! I generated a quick summary and highlighted differences. Ask me anything about this verification.",
+      }]);
+    }
+  }, [report]);
 
   useEffect(() => {
     // Scroll to bottom when messages change
     listRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
 
-  const send = () => {
-    const text = input.trim();
-    if (!text) return;
-    setMessages((m) => [...m, { role: "user", content: text }]);
-    setInput("");
-    // Simple mock assistant reply
-    const reply =
-      text.toLowerCase().includes("summary")
-        ? `Summary: ${summaryText}`
-        : discrepancies.length > 0
-          ? `Top flagged item: ${discrepancies[0].name} — ${discrepancies[0].details}`
-          : "No discrepancies found.";
-    setTimeout(() => setMessages((m) => [...m, { role: "assistant", content: reply }]), 400);
+  const sendMessage = async (message: string) => {
+    if (!message.trim() || !reportId) return;
+    
+    setMessages((m) => [...m, { role: "user", content: message }]);
+    
+    try {
+      const response = await fetch(`${import.meta.env?.VITE_BACKEND_URL}/message/${reportId}`, {
+        method: "POST",
+        headers: {
+          "ngrok-skip-browser-warning": "true",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ message }),
+      });
+      
+      if (!response.ok) {
+        throw new Error("Failed to send message");
+      }
+      
+      const data = await response.json();
+      setMessages((m) => [...m, { role: "assistant", content: data.response || "I understand your question." }]);
+    } catch (error) {
+      console.error("Error sending message:", error);
+      setMessages((m) => [...m, { role: "assistant", content: "Sorry, I encountered an error processing your message." }]);
+    }
   };
 
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(() => {
@@ -161,9 +231,7 @@ export default function Report() {
       <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-50">
         <AIInputWithFile
           onSubmit={(msg) => {
-            if (!msg.trim()) return;
-            setMessages((m) => [...m, { role: "user", content: msg }]);
-            setTimeout(() => setMessages((m) => [...m, { role: "assistant", content: "Got it. Let me analyze that for you." }]), 300);
+            sendMessage(msg);
           }}
           className="border bg-card rounded-2xl px-0"
         />

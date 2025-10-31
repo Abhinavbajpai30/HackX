@@ -1,7 +1,21 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ChevronLeft, ChevronRight, MessageSquare } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { AuthService } from "@/lib/auth";
+
+const BACKEND_URL = import.meta.env?.VITE_BACKEND_URL || "http://localhost:8000";
+
+type Discrepancy = {
+  name: string;
+  details: string;
+};
+
+type ReportItem = {
+  vendor_id?: string | null;
+  discrepancy: Discrepancy[];
+  summary: string;
+};
 
 export default function ChatSidebar({ className = "", onToggle }: { className?: string; onToggle?: (open: boolean) => void }) {
   const navigate = useNavigate();
@@ -10,25 +24,40 @@ export default function ChatSidebar({ className = "", onToggle }: { className?: 
     return v !== "false"; // default open
   });
 
+  const [reports, setReports] = useState<ReportItem[]>([]);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
+
   useEffect(() => {
     localStorage.setItem("sidebarOpen", String(open));
     onToggle?.(open);
   }, [open, onToggle]);
 
-  const chats = useMemo(
-    () => [
-      { id: "1", title: "Greeting conversation" },
-      { id: "2", title: "Fix ShadCN Bun Error" },
-      { id: "3", title: "Hackathon team advice" },
-      { id: "4", title: "Extract image text" },
-      { id: "5", title: "GDG Campus Challenges" },
-    ],
-    []
-  );
+  useEffect(() => {
+    const fetchReports = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const headers: HeadersInit = { "Content-Type": "application/json", "ngrok-skip-browser-warning": "true" };
+        const token = AuthService.getToken();
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        const res = await fetch(`${BACKEND_URL}/reports`, { headers });
+        if (!res.ok) throw new Error(`Failed to fetch reports: ${res.status}`);
+        const data = (await res.json()) as ReportItem[];
+        setReports(Array.isArray(data) ? data : []);
+      } catch (e) {
+        console.error(e);
+        setError("Unable to load reports");
+      } finally {
+        setLoading(false);
+      }
+    };
 
-  const goToChat = (id: string) => {
-    // TODO: replace with real route once backend exists
-    navigate("/report");
+    fetchReports();
+  }, []);
+
+  const openReport = (report: ReportItem) => {
+    navigate("/report", { state: { report } });
   };
 
   return (
@@ -43,7 +72,7 @@ export default function ChatSidebar({ className = "", onToggle }: { className?: 
       {/* Panel */}
       <div className={cn("h-full border-r bg-background overflow-hidden", open ? "opacity-100" : "opacity-0")}>        
         <div className="flex items-center justify-between px-4 py-3 border-b">
-          <div className="font-semibold text-sm text-foreground">Chats</div>
+          <div className="font-semibold text-sm text-foreground">Reports</div>
           <button
             onClick={() => setOpen(false)}
             className="p-1 rounded hover:bg-accent"
@@ -54,14 +83,25 @@ export default function ChatSidebar({ className = "", onToggle }: { className?: 
         </div>
 
         <div className="p-2 space-y-1">
-          {chats.map((c) => (
+          {loading && (
+            <div className="text-xs text-muted-foreground px-3 py-2">Loading…</div>
+          )}
+          {error && (
+            <div className="text-xs text-red-500 px-3 py-2">{error}</div>
+          )}
+          {!loading && !error && reports.length === 0 && (
+            <div className="text-xs text-muted-foreground px-3 py-2">No reports yet.</div>
+          )}
+          {reports.map((r, idx) => (
             <button
-              key={c.id}
-              onClick={() => goToChat(c.id)}
+              key={idx}
+              onClick={() => openReport(r)}
               className="w-full flex items-center gap-2 px-3 py-2 rounded-md hover:bg-accent text-left"
             >
               <MessageSquare className="h-4 w-4 text-muted-foreground" />
-              <span className="truncate text-sm">{c.title}</span>
+              <span className="truncate text-sm">
+                {r.vendor_id || (r.summary ? r.summary.slice(0, 40) + (r.summary.length > 40 ? "…" : "") : "Report")}
+              </span>
             </button>
           ))}
         </div>
